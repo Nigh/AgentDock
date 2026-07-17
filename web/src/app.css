@@ -1,0 +1,19 @@
+@import 'tailwindcss';
+@import '@xterm/xterm/css/xterm.css';
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  background: #0a0a0f;
+  color: #e4e4e7;
+  font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+  overscroll-behavior: none;
+}
+
+/* let xterm own the full terminal area, including on mobile */
+.term-wrap .xterm {
+  height: 100%;
+  padding: 8px;
+}

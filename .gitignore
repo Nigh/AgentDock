@@ -1,0 +1,8 @@
+/bin/
+/data/
+node_modules/
+web/dist/
+server/internal/webui/dist/*
+!server/internal/webui/dist/index.html
+*.db
+.env

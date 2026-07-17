@@ -1,0 +1,21 @@
+services:
+  agent-server:
+    build: .
+    container_name: agentdock-server
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      # REQUIRED: shared secret the agent-client uses to connect (>=16 chars).
+      # Generate one: openssl rand -hex 24
+      AGENTDOCK_NODE_TOKEN: ${AGENTDOCK_NODE_TOKEN:?set AGENTDOCK_NODE_TOKEN in .env}
+      # REQUIRED on first run only: bootstrap the single user.
+      AGENTDOCK_ADMIN_USER: ${AGENTDOCK_ADMIN_USER:-}
+      AGENTDOCK_ADMIN_PASSWORD: ${AGENTDOCK_ADMIN_PASSWORD:-}
+      # Set to "false" only when testing over plain http (no TLS proxy).
+      AGENTDOCK_COOKIE_SECURE: ${AGENTDOCK_COOKIE_SECURE:-true}
+    volumes:
+      - agentdock-data:/data
+
+volumes:
+  agentdock-data:

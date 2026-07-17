@@ -1,0 +1,6 @@
+bin/
+data/
+web/node_modules/
+server/internal/webui/dist/
+.env
+.git/
