@@ -127,9 +127,10 @@ extend the e2e test when adding protocol behavior.
 
 ## Deployment state (reference)
 
-Production: server at `https://example.com` (Caddy ->
-127.0.0.1:8080, compose in `~/app/agentdock` on host `myserver`,
-image shipped via docker save/load). Client runs on the dev PC as a
-systemd user service (`~/.config/systemd/user/agent-client.service`,
-linger enabled). Secrets (node token, passwords) live only in the
-server's `.env` and the service unit — never commit them.
+Production: server runs via docker compose behind an HTTPS reverse
+proxy bound to loopback, image shipped via docker save/load (see
+README). Client runs on the dev PC as a systemd user service
+(`~/.config/systemd/user/agent-client.service`, linger enabled).
+Secrets and real hostnames (node token, passwords, domains) live only
+in the server's `.env` and the service unit — never commit them, and
+never write them into this repo's docs.
