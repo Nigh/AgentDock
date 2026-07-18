@@ -113,7 +113,7 @@
     spawning = true;
     try {
       const name = (sessionName || 'cli') + '-2';
-      const r = await api.createSession(name, '', '', sessionId);
+      const r = await api.createSession({ name, fromSession: sessionId });
       location.hash = `#/session/${r.id}?name=${encodeURIComponent(name)}`;
     } catch (e) {
       term.write(`\r\n\x1b[31m[new CLI failed: ${e.message}]\x1b[0m\r\n`);

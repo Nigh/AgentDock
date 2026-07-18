@@ -35,15 +35,6 @@ func main() {
 
 	addr := env("AGENTDOCK_ADDR", ":8080")
 	dbPath := env("AGENTDOCK_DB", "./data/agentdock.db")
-	nodeToken := os.Getenv("AGENTDOCK_NODE_TOKEN")
-	if nodeToken == "" {
-		log.Error("AGENTDOCK_NODE_TOKEN is required (the agent-client authenticates with it)")
-		os.Exit(1)
-	}
-	if len(nodeToken) < 16 {
-		log.Error("AGENTDOCK_NODE_TOKEN must be at least 16 characters")
-		os.Exit(1)
-	}
 	secureCookie := env("AGENTDOCK_COOKIE_SECURE", "true") == "true"
 
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
@@ -73,14 +64,15 @@ func main() {
 		}
 	}
 
-	if err := bootstrapAdmin(db, log); err != nil {
-		log.Error("bootstrap admin", "err", err)
-		os.Exit(1)
+	// No bootstrap: the first user to register via the web UI becomes
+	// the active admin; everyone after needs admin approval.
+	if n, err := db.UserCount(); err == nil && n == 0 {
+		log.Info("no users yet: the first account registered in the web UI becomes admin")
 	}
 
 	a := auth.New([]byte(secret), 7*24*time.Hour, secureCookie)
 	h := hub.New(db, log)
-	srv := &api.Server{DB: db, Auth: a, Hub: h, NodeToken: nodeToken, Log: log, WebFS: webui.FS()}
+	srv := &api.Server{DB: db, Auth: a, Hub: h, Log: log, WebFS: webui.FS()}
 
 	httpServer := &http.Server{
 		Addr:              addr,
@@ -103,34 +95,4 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	httpServer.Shutdown(ctx)
-}
-
-// bootstrapAdmin creates the single user from env on first run.
-// No default credentials: if the users table is empty and no env is
-// given, the server refuses to start.
-func bootstrapAdmin(db *database.DB, log *slog.Logger) error {
-	n, err := db.UserCount()
-	if err != nil {
-		return err
-	}
-	if n > 0 {
-		return nil
-	}
-	user := os.Getenv("AGENTDOCK_ADMIN_USER")
-	pass := os.Getenv("AGENTDOCK_ADMIN_PASSWORD")
-	if user == "" || pass == "" {
-		return errors.New("no users exist: set AGENTDOCK_ADMIN_USER and AGENTDOCK_ADMIN_PASSWORD for first run")
-	}
-	if len(pass) < 8 {
-		return errors.New("AGENTDOCK_ADMIN_PASSWORD must be at least 8 characters")
-	}
-	hash, err := auth.HashPassword(pass)
-	if err != nil {
-		return err
-	}
-	if err := db.CreateUser(user, hash); err != nil {
-		return err
-	}
-	log.Info("created admin user", "username", user)
-	return nil
 }

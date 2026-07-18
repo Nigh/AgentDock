@@ -1,5 +1,5 @@
-// Package database wraps the SQLite store: users, directories,
-// session metadata and a small settings key/value table.
+// Package database wraps the SQLite store: users, nodes, node access
+// grants, directories, session metadata and a small settings table.
 package database
 
 import (
@@ -32,19 +32,35 @@ CREATE TABLE IF NOT EXISTS users (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	username TEXT NOT NULL UNIQUE,
 	password_hash TEXT NOT NULL,
-	role TEXT NOT NULL DEFAULT 'admin', -- reserved for future multi-user
+	role TEXT NOT NULL DEFAULT 'user',      -- 'admin' | 'user'
+	status TEXT NOT NULL DEFAULT 'pending', -- 'pending' | 'active'
+	node_token_hash TEXT,                   -- sha256 of the personal node token
 	created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	last_login_at TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS nodes (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	owner_id INTEGER NOT NULL,
+	name TEXT NOT NULL,
+	last_seen TIMESTAMP,
+	UNIQUE(owner_id, name)
+);
+CREATE TABLE IF NOT EXISTS node_access (
+	node_id INTEGER NOT NULL,
+	user_id INTEGER NOT NULL,
+	UNIQUE(node_id, user_id)
+);
 CREATE TABLE IF NOT EXISTS directories (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	user_id INTEGER NOT NULL DEFAULT 0,
 	name TEXT NOT NULL,
 	path TEXT NOT NULL,
 	created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS sessions (
 	id TEXT PRIMARY KEY,
-	node TEXT NOT NULL DEFAULT '', -- reserved for future multi-node
+	node TEXT NOT NULL DEFAULT '',          -- node display name
+	node_id INTEGER NOT NULL DEFAULT 0,
 	name TEXT NOT NULL,
 	cwd TEXT NOT NULL,
 	shell TEXT NOT NULL,
@@ -79,11 +95,15 @@ func (d *DB) SetSetting(key, value string) error {
 // ---- users ----
 
 type User struct {
-	ID           int64
-	Username     string
-	PasswordHash string
-	Role         string
+	ID           int64     `json:"uid"`
+	Username     string    `json:"username"`
+	PasswordHash string    `json:"-"`
+	Role         string    `json:"role"`
+	Status       string    `json:"status"`
+	CreatedAt    time.Time `json:"created_at"`
 }
+
+func (u *User) IsAdmin() bool { return u != nil && u.Role == "admin" }
 
 func (d *DB) UserCount() (int, error) {
 	var n int
@@ -91,24 +111,179 @@ func (d *DB) UserCount() (int, error) {
 	return n, err
 }
 
-func (d *DB) CreateUser(username, passwordHash string) error {
-	_, err := d.Exec(`INSERT INTO users(username, password_hash) VALUES(?,?)`, username, passwordHash)
-	return err
+func (d *DB) CreateUser(username, passwordHash, role, status string) (int64, error) {
+	res, err := d.Exec(`INSERT INTO users(username, password_hash, role, status) VALUES(?,?,?,?)`,
+		username, passwordHash, role, status)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
 }
 
-func (d *DB) GetUser(username string) (*User, error) {
+const userCols = `id, username, password_hash, role, status, created_at`
+
+func (d *DB) scanUser(row *sql.Row) (*User, error) {
 	u := &User{}
-	err := d.QueryRow(`SELECT id, username, password_hash, role FROM users WHERE username = ?`, username).
-		Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role)
+	err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.Status, &u.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	return u, err
 }
 
+func (d *DB) GetUser(username string) (*User, error) {
+	return d.scanUser(d.QueryRow(`SELECT `+userCols+` FROM users WHERE username = ?`, username))
+}
+
+func (d *DB) GetUserByID(id int64) (*User, error) {
+	return d.scanUser(d.QueryRow(`SELECT `+userCols+` FROM users WHERE id = ?`, id))
+}
+
+func (d *DB) GetUserByTokenHash(hash string) (*User, error) {
+	return d.scanUser(d.QueryRow(`SELECT `+userCols+` FROM users WHERE node_token_hash = ?`, hash))
+}
+
+func (d *DB) SetNodeTokenHash(userID int64, hash string) error {
+	_, err := d.Exec(`UPDATE users SET node_token_hash = ? WHERE id = ?`, hash, userID)
+	return err
+}
+
+func (d *DB) ListUsers() ([]User, error) {
+	rows, err := d.Query(`SELECT ` + userCols + ` FROM users ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []User{}
+	for rows.Next() {
+		var u User
+		if err := rows.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.Status, &u.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
+func (d *DB) ApproveUser(id int64) error {
+	_, err := d.Exec(`UPDATE users SET status='active' WHERE id = ?`, id)
+	return err
+}
+
+// DeleteUser removes the user plus their nodes and every access grant
+// involving them (as grantee, or on their nodes).
+func (d *DB) DeleteUser(id int64) error {
+	stmts := []string{
+		`DELETE FROM node_access WHERE user_id = ?`,
+		`DELETE FROM node_access WHERE node_id IN (SELECT id FROM nodes WHERE owner_id = ?)`,
+		`DELETE FROM sessions WHERE node_id IN (SELECT id FROM nodes WHERE owner_id = ?)`,
+		`DELETE FROM directories WHERE user_id = ?`,
+		`DELETE FROM nodes WHERE owner_id = ?`,
+		`DELETE FROM users WHERE id = ?`,
+	}
+	for _, s := range stmts {
+		if _, err := d.Exec(s, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (d *DB) TouchLogin(id int64) error {
 	_, err := d.Exec(`UPDATE users SET last_login_at = ? WHERE id = ?`, time.Now().UTC(), id)
 	return err
+}
+
+// ---- nodes & access ----
+
+type Node struct {
+	ID      int64  `json:"id"`
+	OwnerID int64  `json:"owner_uid"`
+	Name    string `json:"name"`
+}
+
+// UpsertNode registers (or refreshes) a node identified by owner+name
+// and returns its stable id.
+func (d *DB) UpsertNode(ownerID int64, name string) (int64, error) {
+	_, err := d.Exec(`INSERT INTO nodes(owner_id, name, last_seen) VALUES(?,?,?)
+		ON CONFLICT(owner_id, name) DO UPDATE SET last_seen=excluded.last_seen`,
+		ownerID, name, time.Now().UTC())
+	if err != nil {
+		return 0, err
+	}
+	var id int64
+	err = d.QueryRow(`SELECT id FROM nodes WHERE owner_id = ? AND name = ?`, ownerID, name).Scan(&id)
+	return id, err
+}
+
+func (d *DB) GetNode(id int64) (*Node, error) {
+	n := &Node{}
+	err := d.QueryRow(`SELECT id, owner_id, name FROM nodes WHERE id = ?`, id).Scan(&n.ID, &n.OwnerID, &n.Name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return n, err
+}
+
+// ListNodesForUser: everything for admins, owned + shared for others.
+func (d *DB) ListNodesForUser(userID int64, isAdmin bool) ([]Node, error) {
+	q := `SELECT id, owner_id, name FROM nodes
+		WHERE ? OR owner_id = ? OR id IN (SELECT node_id FROM node_access WHERE user_id = ?)
+		ORDER BY name`
+	rows, err := d.Query(q, isAdmin, userID, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Node{}
+	for rows.Next() {
+		var n Node
+		if err := rows.Scan(&n.ID, &n.OwnerID, &n.Name); err != nil {
+			return nil, err
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+
+func (d *DB) UserCanAccessNode(userID, nodeID int64, isAdmin bool) (bool, error) {
+	if isAdmin {
+		return true, nil
+	}
+	var ok bool
+	err := d.QueryRow(`SELECT EXISTS(SELECT 1 FROM nodes WHERE id = ? AND owner_id = ?)
+		OR EXISTS(SELECT 1 FROM node_access WHERE node_id = ? AND user_id = ?)`,
+		nodeID, userID, nodeID, userID).Scan(&ok)
+	return ok, err
+}
+
+func (d *DB) GrantNodeAccess(nodeID, userID int64) error {
+	_, err := d.Exec(`INSERT INTO node_access(node_id, user_id) VALUES(?,?) ON CONFLICT DO NOTHING`, nodeID, userID)
+	return err
+}
+
+func (d *DB) RevokeNodeAccess(nodeID, userID int64) error {
+	_, err := d.Exec(`DELETE FROM node_access WHERE node_id = ? AND user_id = ?`, nodeID, userID)
+	return err
+}
+
+// ListNodeShares returns the users a node has been shared with.
+func (d *DB) ListNodeShares(nodeID int64) ([]User, error) {
+	rows, err := d.Query(`SELECT u.id, u.username FROM node_access a
+		JOIN users u ON u.id = a.user_id WHERE a.node_id = ? ORDER BY u.id`, nodeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []User{}
+	for rows.Next() {
+		var u User
+		if err := rows.Scan(&u.ID, &u.Username); err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
 }
 
 // ---- directories ----
@@ -119,8 +294,8 @@ type Directory struct {
 	Path string `json:"path"`
 }
 
-func (d *DB) ListDirectories() ([]Directory, error) {
-	rows, err := d.Query(`SELECT id, name, path FROM directories ORDER BY name`)
+func (d *DB) ListDirectories(userID int64) ([]Directory, error) {
+	rows, err := d.Query(`SELECT id, name, path FROM directories WHERE user_id = ? ORDER BY name`, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -136,16 +311,16 @@ func (d *DB) ListDirectories() ([]Directory, error) {
 	return out, rows.Err()
 }
 
-func (d *DB) CreateDirectory(name, path string) (int64, error) {
-	res, err := d.Exec(`INSERT INTO directories(name, path) VALUES(?,?)`, name, path)
+func (d *DB) CreateDirectory(userID int64, name, path string) (int64, error) {
+	res, err := d.Exec(`INSERT INTO directories(user_id, name, path) VALUES(?,?,?)`, userID, name, path)
 	if err != nil {
 		return 0, err
 	}
 	return res.LastInsertId()
 }
 
-func (d *DB) DeleteDirectory(id int64) error {
-	_, err := d.Exec(`DELETE FROM directories WHERE id = ?`, id)
+func (d *DB) DeleteDirectory(id, userID int64) error {
+	_, err := d.Exec(`DELETE FROM directories WHERE id = ? AND user_id = ?`, id, userID)
 	return err
 }
 
@@ -154,6 +329,7 @@ func (d *DB) DeleteDirectory(id int64) error {
 type SessionMeta struct {
 	ID         string    `json:"id"`
 	Node       string    `json:"node"`
+	NodeID     int64     `json:"node_id"`
 	Name       string    `json:"name"`
 	Cwd        string    `json:"cwd"`
 	Shell      string    `json:"shell"`
@@ -164,11 +340,11 @@ type SessionMeta struct {
 }
 
 func (d *DB) UpsertSession(s SessionMeta) error {
-	_, err := d.Exec(`INSERT INTO sessions(id,node,name,cwd,shell,pid,status,created_at,last_active)
-		VALUES(?,?,?,?,?,?,?,?,?)
-		ON CONFLICT(id) DO UPDATE SET node=excluded.node, name=excluded.name, cwd=excluded.cwd,
-			shell=excluded.shell, pid=excluded.pid, status=excluded.status, last_active=excluded.last_active`,
-		s.ID, s.Node, s.Name, s.Cwd, s.Shell, s.Pid, s.Status, s.CreatedAt.UTC(), s.LastActive.UTC())
+	_, err := d.Exec(`INSERT INTO sessions(id,node,node_id,name,cwd,shell,pid,status,created_at,last_active)
+		VALUES(?,?,?,?,?,?,?,?,?,?)
+		ON CONFLICT(id) DO UPDATE SET node=excluded.node, node_id=excluded.node_id, name=excluded.name,
+			cwd=excluded.cwd, shell=excluded.shell, pid=excluded.pid, status=excluded.status, last_active=excluded.last_active`,
+		s.ID, s.Node, s.NodeID, s.Name, s.Cwd, s.Shell, s.Pid, s.Status, s.CreatedAt.UTC(), s.LastActive.UTC())
 	return err
 }
 
@@ -182,19 +358,51 @@ func (d *DB) DeleteSession(id string) error {
 	return err
 }
 
-func (d *DB) ListSessions() ([]SessionMeta, error) {
-	rows, err := d.Query(`SELECT id,node,name,cwd,shell,pid,status,created_at,last_active FROM sessions ORDER BY created_at DESC`)
-	if err != nil {
-		return nil, err
-	}
+const sessionCols = `id,node,node_id,name,cwd,shell,pid,status,created_at,last_active`
+
+func (d *DB) scanSessions(rows *sql.Rows) ([]SessionMeta, error) {
 	defer rows.Close()
 	out := []SessionMeta{}
 	for rows.Next() {
 		var s SessionMeta
-		if err := rows.Scan(&s.ID, &s.Node, &s.Name, &s.Cwd, &s.Shell, &s.Pid, &s.Status, &s.CreatedAt, &s.LastActive); err != nil {
+		if err := rows.Scan(&s.ID, &s.Node, &s.NodeID, &s.Name, &s.Cwd, &s.Shell, &s.Pid, &s.Status, &s.CreatedAt, &s.LastActive); err != nil {
 			return nil, err
 		}
 		out = append(out, s)
 	}
 	return out, rows.Err()
+}
+
+func (d *DB) GetSession(id string) (*SessionMeta, error) {
+	rows, err := d.Query(`SELECT `+sessionCols+` FROM sessions WHERE id = ?`, id)
+	if err != nil {
+		return nil, err
+	}
+	all, err := d.scanSessions(rows)
+	if err != nil || len(all) == 0 {
+		return nil, err
+	}
+	return &all[0], nil
+}
+
+// ListSessionsForNode returns every session recorded for one node.
+func (d *DB) ListSessionsForNode(nodeID int64) ([]SessionMeta, error) {
+	rows, err := d.Query(`SELECT `+sessionCols+` FROM sessions WHERE node_id = ? ORDER BY created_at DESC`, nodeID)
+	if err != nil {
+		return nil, err
+	}
+	return d.scanSessions(rows)
+}
+
+// ListSessionsForUser returns sessions on every node the user can access.
+func (d *DB) ListSessionsForUser(userID int64, isAdmin bool) ([]SessionMeta, error) {
+	rows, err := d.Query(`SELECT `+sessionCols+` FROM sessions
+		WHERE ? OR node_id IN (
+			SELECT id FROM nodes WHERE owner_id = ?
+			UNION SELECT node_id FROM node_access WHERE user_id = ?)
+		ORDER BY created_at DESC`, isAdmin, userID, userID)
+	if err != nil {
+		return nil, err
+	}
+	return d.scanSessions(rows)
 }

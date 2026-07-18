@@ -1,31 +1,47 @@
 <script>
   import { api } from './api.js';
 
-  let { username, onLogout } = $props();
+  let { user, onLogout } = $props();
 
-  let node = $state({ name: '', connected: false });
+  let nodes = $state([]);
   let sessions = $state([]);
   let directories = $state([]);
   let error = $state('');
 
-  // new-session form
-  let showNew = $state(false);
+  // connect-a-PC card
+  let showConnect = $state(false);
+  let freshToken = $state('');
+  let copied = $state(false);
+
+  // new-session form (nodeId selects which PC)
+  let newForNode = $state(0); // node id the form is open for, 0 = closed
   let newName = $state('');
   let newDir = $state('');
   let newShell = $state('');
   let creating = $state(false);
 
+  // share form
+  let shareForNode = $state(0);
+  let shareUid = $state('');
+
   // new-directory form
   let showNewDir = $state(false);
   let dirName = $state('');
   let dirPath = $state('');
+  // node used by directory quick-open when several are online
+  let quickNode = $state(0);
+
+  const onlineNodes = $derived(nodes.filter((n) => n.connected));
 
   async function refresh() {
     try {
       const s = await api.state();
-      node = s.node;
+      nodes = s.nodes;
       sessions = s.sessions;
       directories = s.directories;
+      if (!onlineNodes.some((n) => n.id === quickNode)) {
+        quickNode = onlineNodes[0]?.id || 0;
+      }
     } catch (e) {
       if (e.status === 401) location.reload();
     }
@@ -37,6 +53,27 @@
     return () => clearInterval(t);
   });
 
+  async function generateToken() {
+    error = '';
+    if (freshToken || confirm('Generate a new node token? Any previously issued token stops working.')) {
+      try {
+        const r = await api.nodeToken();
+        freshToken = r.token;
+        copied = false;
+      } catch (e) {
+        error = e.message;
+      }
+    }
+  }
+
+  const connectCmd = $derived(
+    `agent-client connect --server ${location.origin} --token ${freshToken || '<token>'}`
+  );
+
+  function copyCmd() {
+    navigator.clipboard.writeText(connectCmd).then(() => (copied = true));
+  }
+
   function openSession(s) {
     location.hash = `#/session/${s.id}?name=${encodeURIComponent(s.name)}`;
   }
@@ -46,10 +83,11 @@
     error = '';
     creating = true;
     try {
-      const r = await api.createSession(newName, newDir, newShell);
-      showNew = false;
-      location.hash = `#/session/${r.id}?name=${encodeURIComponent(newName)}`;
+      const r = await api.createSession({ name: newName, nodeId: newForNode, cwd: newDir, shell: newShell });
+      const name = newName;
+      newForNode = 0;
       newName = newDir = newShell = '';
+      location.hash = `#/session/${r.id}?name=${encodeURIComponent(name)}`;
     } catch (e) {
       error = e.message;
     } finally {
@@ -60,13 +98,35 @@
   // "quick open": one tap on a saved directory creates a session there
   async function quickOpen(dir) {
     error = '';
+    if (!quickNode) {
+      error = 'no PC online';
+      return;
+    }
     try {
       const name = dir.name.toLowerCase().replace(/[^a-z0-9]+/g, '-');
-      const r = await api.createSession(name, dir.path, '');
+      const r = await api.createSession({ name, nodeId: quickNode, cwd: dir.path });
       location.hash = `#/session/${r.id}?name=${encodeURIComponent(name)}`;
     } catch (e) {
       error = e.message;
     }
+  }
+
+  async function share(e, nodeId) {
+    e.preventDefault();
+    error = '';
+    try {
+      await api.shareNode(nodeId, Number(shareUid));
+      shareForNode = 0;
+      shareUid = '';
+      refresh();
+    } catch (e) {
+      error = e.message;
+    }
+  }
+
+  async function revoke(nodeId, uid) {
+    await api.revokeShare(nodeId, uid).catch((e) => (error = e.message));
+    refresh();
   }
 
   async function addDirectory(e) {
@@ -93,6 +153,10 @@
     refresh();
   }
 
+  function sessionsOf(nodeId) {
+    return sessions.filter((s) => s.node_id === nodeId);
+  }
+
   function fmtTime(t) {
     return new Date(t).toLocaleString();
   }
@@ -102,11 +166,19 @@
   <header class="mb-6 flex items-center justify-between">
     <div>
       <h1 class="text-xl font-bold text-white">AgentDock</h1>
-      <div class="text-sm text-zinc-500">{username}</div>
+      <div class="text-sm text-zinc-500">{user.username} <span class="text-zinc-600">#{user.uid}</span></div>
     </div>
-    <button onclick={onLogout} class="rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-800">
-      Sign out
-    </button>
+    <div class="flex gap-2">
+      {#if user.role === 'admin'}
+        <button onclick={() => (location.hash = '#/admin')}
+          class="rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-800">
+          Admin
+        </button>
+      {/if}
+      <button onclick={onLogout} class="rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-800">
+        Sign out
+      </button>
+    </div>
   </header>
 
   {#if error}
@@ -116,102 +188,151 @@
     </div>
   {/if}
 
-  <!-- Node status -->
+  <!-- Connect a PC -->
   <section class="mb-6 rounded-xl border border-zinc-800 bg-zinc-900/60 p-4">
-    <div class="text-xs font-medium uppercase tracking-wider text-zinc-500">Connected PC</div>
-    <div class="mt-2 flex items-center gap-2">
-      <span class="h-2.5 w-2.5 rounded-full {node.connected ? 'bg-emerald-500' : 'bg-red-500'}"></span>
-      {#if node.connected}
-        <span class="font-medium text-white">{node.name || 'unnamed'}</span>
-        <span class="text-sm text-emerald-500">online</span>
-      {:else}
-        <span class="text-sm text-zinc-400">No PC connected — run <code class="rounded bg-zinc-800 px-1">agent-client connect</code></span>
-      {/if}
+    <div class="flex items-center justify-between">
+      <div class="text-xs font-medium uppercase tracking-wider text-zinc-500">Connect a PC</div>
+      <button onclick={() => (showConnect = !showConnect)} class="text-sm text-zinc-400 hover:text-white">
+        {showConnect ? 'Hide' : 'Show'}
+      </button>
     </div>
+    {#if showConnect}
+      <p class="mt-2 text-sm text-zinc-400">
+        Generate your personal node token, then run agent-client on the PC. The node belongs to your
+        account automatically. Regenerating revokes the previous token.
+      </p>
+      <div class="mt-3 flex flex-wrap items-center gap-2">
+        <button onclick={generateToken}
+          class="rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-500">
+          {freshToken ? 'Regenerate token' : 'Generate token'}
+        </button>
+        {#if freshToken}
+          <button onclick={copyCmd} class="rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-800">
+            {copied ? 'Copied' : 'Copy command'}
+          </button>
+        {/if}
+      </div>
+      {#if freshToken}
+        <code class="mt-3 block overflow-x-auto rounded-lg bg-zinc-950 px-3 py-2 text-xs text-emerald-300">{connectCmd}</code>
+        <p class="mt-1 text-xs text-amber-500">Shown once — the server only stores a hash.</p>
+      {/if}
+    {/if}
   </section>
 
-  <!-- Sessions -->
+  <!-- Nodes -->
   <section class="mb-6">
-    <div class="mb-3 flex items-center justify-between">
-      <h2 class="text-sm font-medium uppercase tracking-wider text-zinc-500">Sessions</h2>
-      <div class="flex gap-2">
-        <button
-          onclick={() => (location.hash = '#/browse')}
-          disabled={!node.connected}
-          class="rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-800 disabled:opacity-40"
-        >
-          Browse…
-        </button>
-        <button
-          onclick={() => (showNew = !showNew)}
-          disabled={!node.connected}
-          class="rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-40"
-        >
-          New Session
-        </button>
+    <h2 class="mb-3 text-sm font-medium uppercase tracking-wider text-zinc-500">PCs</h2>
+
+    {#if nodes.length === 0}
+      <div class="rounded-xl border border-dashed border-zinc-800 p-6 text-center text-sm text-zinc-600">
+        No PC yet — generate a token above and run agent-client
       </div>
-    </div>
-
-    {#if showNew}
-      <form onsubmit={createSession} class="mb-4 rounded-xl border border-zinc-800 bg-zinc-900/60 p-4">
-        <div class="grid gap-3 sm:grid-cols-3">
-          <label class="block">
-            <span class="mb-1 block text-xs text-zinc-500">Name</span>
-            <input bind:value={newName} required placeholder="cursor-robot"
-              class="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-white outline-none focus:border-emerald-500" />
-          </label>
-          <label class="block">
-            <span class="mb-1 block text-xs text-zinc-500">Directory (optional)</span>
-            <input bind:value={newDir} placeholder="~ by default" list="dir-list"
-              class="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-white outline-none focus:border-emerald-500" />
-            <datalist id="dir-list">
-              {#each directories as d}<option value={d.path}>{d.name}</option>{/each}
-            </datalist>
-          </label>
-          <label class="block">
-            <span class="mb-1 block text-xs text-zinc-500">Shell (optional)</span>
-            <input bind:value={newShell} placeholder="$SHELL by default"
-              class="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-white outline-none focus:border-emerald-500" />
-          </label>
-        </div>
-        <div class="mt-3 flex gap-2">
-          <button disabled={creating} class="rounded-lg bg-emerald-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50">
-            {creating ? 'Creating…' : 'Create'}
-          </button>
-          <button type="button" onclick={() => (showNew = false)} class="rounded-lg border border-zinc-700 px-4 py-1.5 text-sm text-zinc-300">
-            Cancel
-          </button>
-        </div>
-      </form>
     {/if}
 
-    {#if sessions.length === 0}
-      <div class="rounded-xl border border-dashed border-zinc-800 p-6 text-center text-sm text-zinc-600">No sessions yet</div>
-    {/if}
-
-    <div class="space-y-2">
-      {#each sessions as s (s.id)}
-        <div class="flex items-center gap-3 rounded-xl border border-zinc-800 bg-zinc-900/60 p-4">
-          <div class="min-w-0 flex-1">
-            <div class="flex items-center gap-2">
-              <span class="truncate font-medium text-white">{s.name}</span>
-              <span class="rounded-full px-2 py-0.5 text-xs {s.status === 'running' ? 'bg-emerald-950 text-emerald-400' : 'bg-zinc-800 text-zinc-500'}">
-                {s.status}
-              </span>
+    <div class="space-y-3">
+      {#each nodes as n (n.id)}
+        <div class="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4">
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="h-2.5 w-2.5 rounded-full {n.connected ? 'bg-emerald-500' : 'bg-red-500'}"></span>
+            <span class="font-medium text-white">{n.name}</span>
+            <span class="text-xs text-zinc-500">owner {n.owner} #{n.owner_uid}</span>
+            <div class="ml-auto flex gap-2">
+              <button onclick={() => (shareForNode = shareForNode === n.id ? 0 : n.id)}
+                class="rounded-lg border border-zinc-700 px-3 py-1 text-sm text-zinc-300 hover:bg-zinc-800">
+                Share
+              </button>
+              <button onclick={() => (location.hash = `#/browse?node=${n.id}`)} disabled={!n.connected}
+                class="rounded-lg border border-zinc-700 px-3 py-1 text-sm text-zinc-300 hover:bg-zinc-800 disabled:opacity-40">
+                Browse…
+              </button>
+              <button onclick={() => (newForNode = newForNode === n.id ? 0 : n.id)} disabled={!n.connected}
+                class="rounded-lg bg-emerald-600 px-3 py-1 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-40">
+                New Session
+              </button>
             </div>
-            <div class="mt-0.5 truncate text-xs text-zinc-500">{s.cwd}</div>
-            <div class="text-xs text-zinc-600">created {fmtTime(s.created_at)}</div>
           </div>
-          {#if s.status === 'running'}
-            <button onclick={() => openSession(s)}
-              class="rounded-lg bg-zinc-800 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-700">
-              Open
-            </button>
+
+          {#if n.shares?.length}
+            <div class="mt-2 flex flex-wrap items-center gap-1.5 text-xs text-zinc-500">
+              shared with
+              {#each n.shares as sh (sh.uid)}
+                <span class="flex items-center gap-1 rounded-full bg-zinc-800 px-2 py-0.5 text-zinc-300">
+                  {sh.username} #{sh.uid}
+                  <button onclick={() => revoke(n.id, sh.uid)} aria-label="Revoke access for {sh.username}"
+                    class="text-zinc-500 hover:text-red-400">✕</button>
+                </span>
+              {/each}
+            </div>
           {/if}
-          <button onclick={() => killSession(s)} aria-label="Kill session {s.name}"
-            class="rounded-lg border border-zinc-800 px-3 py-2 text-sm text-red-400 hover:bg-red-950/40">
-            {s.status === 'running' ? 'Kill' : 'Remove'}
-          </button>
+
+          {#if shareForNode === n.id}
+            <form onsubmit={(e) => share(e, n.id)} class="mt-3 flex gap-2">
+              <input bind:value={shareUid} required placeholder="uid, e.g. 2" inputmode="numeric" pattern="[0-9]+"
+                class="w-32 rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-white outline-none focus:border-emerald-500" />
+              <button class="rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-500">Grant</button>
+            </form>
+          {/if}
+
+          {#if newForNode === n.id}
+            <form onsubmit={createSession} class="mt-3 rounded-lg border border-zinc-800 bg-zinc-950/60 p-3">
+              <div class="grid gap-3 sm:grid-cols-3">
+                <label class="block">
+                  <span class="mb-1 block text-xs text-zinc-500">Name</span>
+                  <input bind:value={newName} required placeholder="cursor-robot"
+                    class="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-white outline-none focus:border-emerald-500" />
+                </label>
+                <label class="block">
+                  <span class="mb-1 block text-xs text-zinc-500">Directory (optional)</span>
+                  <input bind:value={newDir} placeholder="~ by default" list="dir-list"
+                    class="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-white outline-none focus:border-emerald-500" />
+                  <datalist id="dir-list">
+                    {#each directories as d}<option value={d.path}>{d.name}</option>{/each}
+                  </datalist>
+                </label>
+                <label class="block">
+                  <span class="mb-1 block text-xs text-zinc-500">Shell (optional)</span>
+                  <input bind:value={newShell} placeholder="$SHELL by default"
+                    class="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-white outline-none focus:border-emerald-500" />
+                </label>
+              </div>
+              <div class="mt-3 flex gap-2">
+                <button disabled={creating} class="rounded-lg bg-emerald-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50">
+                  {creating ? 'Creating…' : 'Create'}
+                </button>
+                <button type="button" onclick={() => (newForNode = 0)} class="rounded-lg border border-zinc-700 px-4 py-1.5 text-sm text-zinc-300">
+                  Cancel
+                </button>
+              </div>
+            </form>
+          {/if}
+
+          <!-- sessions on this node -->
+          <div class="mt-3 space-y-2">
+            {#each sessionsOf(n.id) as s (s.id)}
+              <div class="flex items-center gap-3 rounded-lg border border-zinc-800 bg-zinc-950/40 p-3">
+                <div class="min-w-0 flex-1">
+                  <div class="flex items-center gap-2">
+                    <span class="truncate font-medium text-white">{s.name}</span>
+                    <span class="rounded-full px-2 py-0.5 text-xs {s.status === 'running' ? 'bg-emerald-950 text-emerald-400' : 'bg-zinc-800 text-zinc-500'}">
+                      {s.status}
+                    </span>
+                  </div>
+                  <div class="mt-0.5 truncate text-xs text-zinc-500">{s.cwd}</div>
+                  <div class="text-xs text-zinc-600">created {fmtTime(s.created_at)}</div>
+                </div>
+                {#if s.status === 'running'}
+                  <button onclick={() => openSession(s)}
+                    class="rounded-lg bg-zinc-800 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-700">
+                    Open
+                  </button>
+                {/if}
+                <button onclick={() => killSession(s)} aria-label="Kill session {s.name}"
+                  class="rounded-lg border border-zinc-800 px-3 py-2 text-sm text-red-400 hover:bg-red-950/40">
+                  {s.status === 'running' ? 'Kill' : 'Remove'}
+                </button>
+              </div>
+            {/each}
+          </div>
         </div>
       {/each}
     </div>
@@ -219,12 +340,20 @@
 
   <!-- Directories -->
   <section>
-    <div class="mb-3 flex items-center justify-between">
+    <div class="mb-3 flex items-center justify-between gap-2">
       <h2 class="text-sm font-medium uppercase tracking-wider text-zinc-500">Saved Directories</h2>
-      <button onclick={() => (showNewDir = !showNewDir)}
-        class="rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-800">
-        Add
-      </button>
+      <div class="flex items-center gap-2">
+        {#if onlineNodes.length > 1}
+          <select bind:value={quickNode} aria-label="PC for quick open"
+            class="rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-sm text-zinc-300">
+            {#each onlineNodes as n (n.id)}<option value={n.id}>{n.name}</option>{/each}
+          </select>
+        {/if}
+        <button onclick={() => (showNewDir = !showNewDir)}
+          class="rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-800">
+          Add
+        </button>
+      </div>
     </div>
 
     {#if showNewDir}
@@ -251,7 +380,7 @@
     <div class="space-y-2">
       {#each directories as d (d.id)}
         <div class="flex items-center gap-3 rounded-xl border border-zinc-800 bg-zinc-900/60 p-4">
-          <button onclick={() => quickOpen(d)} disabled={!node.connected}
+          <button onclick={() => quickOpen(d)} disabled={!quickNode}
             class="min-w-0 flex-1 text-left disabled:opacity-50">
             <div class="truncate font-medium text-white">{d.name}</div>
             <div class="truncate text-xs text-zinc-500">{d.path}</div>

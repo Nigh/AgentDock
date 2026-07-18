@@ -2,18 +2,29 @@
   import { api } from './api.js';
 
   let { onlogin } = $props();
+  let mode = $state('login'); // 'login' | 'register'
   let username = $state('');
   let password = $state('');
   let error = $state('');
+  let notice = $state('');
   let busy = $state(false);
 
   async function submit(e) {
     e.preventDefault();
-    error = '';
+    error = notice = '';
     busy = true;
     try {
+      if (mode === 'register') {
+        const r = await api.register(username, password);
+        if (r.status === 'pending') {
+          notice = 'Account created. An admin must approve it before you can sign in.';
+          mode = 'login';
+          return;
+        }
+        // first user: active admin, sign straight in
+      }
       const r = await api.login(username, password);
-      onlogin(r.username);
+      onlogin(r);
     } catch (err) {
       error = err.message === 'unauthorized' ? 'Invalid username or password' : err.message;
     } finally {
@@ -44,8 +55,9 @@
       <input
         type="password"
         bind:value={password}
-        autocomplete="current-password"
+        autocomplete={mode === 'register' ? 'new-password' : 'current-password'}
         required
+        minlength={mode === 'register' ? 8 : undefined}
         class="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-white outline-none focus:border-emerald-500"
       />
     </label>
@@ -53,12 +65,23 @@
     {#if error}
       <div class="mb-4 rounded-lg bg-red-950/60 px-3 py-2 text-sm text-red-400" role="alert">{error}</div>
     {/if}
+    {#if notice}
+      <div class="mb-4 rounded-lg bg-emerald-950/60 px-3 py-2 text-sm text-emerald-400" role="status">{notice}</div>
+    {/if}
 
     <button
       disabled={busy}
       class="w-full rounded-lg bg-emerald-600 py-2.5 font-medium text-white transition hover:bg-emerald-500 disabled:opacity-50"
     >
-      {busy ? 'Signing in…' : 'Sign in'}
+      {busy ? '…' : mode === 'register' ? 'Create account' : 'Sign in'}
+    </button>
+
+    <button
+      type="button"
+      onclick={() => { mode = mode === 'login' ? 'register' : 'login'; error = notice = ''; }}
+      class="mt-4 w-full text-center text-sm text-zinc-500 hover:text-zinc-300"
+    >
+      {mode === 'login' ? 'No account? Register' : 'Have an account? Sign in'}
     </button>
   </form>
 </div>

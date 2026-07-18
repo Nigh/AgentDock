@@ -19,14 +19,21 @@ export class ApiError extends Error {
 
 export const api = {
   me: () => req('GET', '/api/me'),
+  register: (username, password) => req('POST', '/api/register', { username, password }),
   login: (username, password) => req('POST', '/api/login', { username, password }),
   logout: () => req('POST', '/api/logout'),
+  nodeToken: () => req('POST', '/api/me/node-token'),
   state: () => req('GET', '/api/state'),
+  listUsers: () => req('GET', '/api/users'),
+  approveUser: (uid) => req('POST', `/api/users/${uid}/approve`),
+  deleteUser: (uid) => req('DELETE', `/api/users/${uid}`),
+  shareNode: (nodeId, uid) => req('POST', `/api/nodes/${nodeId}/share`, { uid }),
+  revokeShare: (nodeId, uid) => req('DELETE', `/api/nodes/${nodeId}/share/${uid}`),
   createDirectory: (name, path) => req('POST', '/api/directories', { name, path }),
   deleteDirectory: (id) => req('DELETE', `/api/directories/${id}`),
-  browse: (path) => req('GET', `/api/browse?path=${encodeURIComponent(path || '')}`),
-  createSession: (name, cwd, shell, fromSession) =>
-    req('POST', '/api/sessions', { name, cwd, shell, from_session: fromSession }),
+  browse: (nodeId, path) => req('GET', `/api/browse?node_id=${nodeId}&path=${encodeURIComponent(path || '')}`),
+  createSession: ({ name, nodeId = 0, cwd = '', shell = '', fromSession = '' }) =>
+    req('POST', '/api/sessions', { name, cwd, shell, node_id: nodeId, from_session: fromSession }),
   killSession: (id) => req('DELETE', `/api/sessions/${id}`),
 };
 

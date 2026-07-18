@@ -34,6 +34,8 @@ var upgrader = websocket.Upgrader{
 }
 
 type nodeConn struct {
+	id       int64 // db node id, assigned on hello
+	ownerID  int64 // authenticated owner (from the personal node token)
 	name     string
 	conn     *websocket.Conn
 	writeMu  sync.Mutex
@@ -43,6 +45,7 @@ type nodeConn struct {
 type browserConn struct {
 	id        string
 	sessionID string
+	nodeID    int64 // resolved once at attach; a session never moves nodes
 	conn      *websocket.Conn
 	writeMu   sync.Mutex
 	ready     bool // becomes true once the scrollback buffer arrived
@@ -52,9 +55,9 @@ type Hub struct {
 	db  *database.DB
 	log *slog.Logger
 
-	mu sync.Mutex
-	// ponytail: single node for the MVP; becomes map[nodeID]*nodeConn for multi-PC
-	node           *nodeConn
+	mu             sync.Mutex
+	nodes          map[int64]*nodeConn               // db node id -> live connection
+	sessionNode    map[string]int64                  // sessionID -> node id (routing)
 	browsers       map[string]map[*browserConn]bool  // sessionID -> attached browsers
 	pendingCreate  map[string]chan error             // sessionID -> create ack
 	pendingListDir map[string]chan *protocol.Message // request ConnID -> dirlist reply
@@ -64,6 +67,8 @@ func New(db *database.DB, log *slog.Logger) *Hub {
 	return &Hub{
 		db:             db,
 		log:            log,
+		nodes:          map[int64]*nodeConn{},
+		sessionNode:    map[string]int64{},
 		browsers:       map[string]map[*browserConn]bool{},
 		pendingCreate:  map[string]chan error{},
 		pendingListDir: map[string]chan *protocol.Message{},
@@ -78,34 +83,36 @@ func newID() string {
 
 // ---- node side ----
 
-// ServeNode upgrades and runs the websocket for an agent-client.
-func (h *Hub) ServeNode(w http.ResponseWriter, r *http.Request) {
+// ServeNode upgrades and runs the websocket for an agent-client owned
+// by ownerID (already authenticated via its personal node token).
+func (h *Hub) ServeNode(w http.ResponseWriter, r *http.Request, ownerID int64) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		h.log.Error("node upgrade failed", "err", err)
 		return
 	}
-	n := &nodeConn{conn: conn, sessions: map[string]protocol.Session{}}
+	n := &nodeConn{ownerID: ownerID, conn: conn, sessions: map[string]protocol.Session{}}
 
-	h.mu.Lock()
-	if h.node != nil {
-		h.log.Warn("replacing existing node connection")
-		h.node.conn.Close()
-	}
-	h.node = n
-	h.mu.Unlock()
-
-	h.log.Info("node connected", "remote", r.RemoteAddr)
+	h.log.Info("node connected", "remote", r.RemoteAddr, "owner", ownerID)
 	h.readNode(n)
 
 	h.mu.Lock()
-	if h.node == n {
-		h.node = nil
+	registered := n.id != 0 && h.nodes[n.id] == n
+	if registered {
+		delete(h.nodes, n.id)
+	}
+	var orphaned []string
+	for sid, nid := range h.sessionNode {
+		if nid == n.id && registered {
+			orphaned = append(orphaned, sid)
+		}
 	}
 	h.mu.Unlock()
 	conn.Close()
-	h.log.Info("node disconnected")
-	h.notifyAllBrowsers(`{"type":"node_offline"}`)
+	h.log.Info("node disconnected", "name", n.name, "owner", ownerID)
+	for _, sid := range orphaned {
+		h.notifySessionBrowsers(sid, `{"type":"node_offline"}`)
+	}
 }
 
 func (h *Hub) readNode(n *nodeConn) {
@@ -152,19 +159,47 @@ func (h *Hub) readNode(n *nodeConn) {
 }
 
 func (h *Hub) handleNodeMessage(n *nodeConn, msg *protocol.Message) {
+	// Everything except hello requires a registered node.
+	if msg.Type != protocol.TypeHello && n.id == 0 {
+		h.log.Warn("message from node before hello", "type", msg.Type)
+		return
+	}
 	switch msg.Type {
 	case protocol.TypeHello:
-		n.name = msg.NodeName
-		h.log.Info("node hello", "name", n.name)
+		name := msg.NodeName
+		if name == "" {
+			name = "unnamed"
+		}
+		id, err := h.db.UpsertNode(n.ownerID, name)
+		if err != nil {
+			h.log.Error("upsert node", "err", err)
+			n.conn.Close()
+			return
+		}
+		n.name, n.id = name, id
+		h.mu.Lock()
+		if old := h.nodes[id]; old != nil {
+			h.log.Warn("replacing existing connection for node", "node", name)
+			old.conn.Close()
+		}
+		h.nodes[id] = n
+		h.mu.Unlock()
+		h.log.Info("node hello", "name", name, "id", id, "owner", n.ownerID)
 
 	case protocol.TypeSessions:
 		h.mu.Lock()
 		n.sessions = map[string]protocol.Session{}
+		for sid, nid := range h.sessionNode { // drop stale routes for this node
+			if nid == n.id {
+				delete(h.sessionNode, sid)
+			}
+		}
 		for _, s := range msg.Sessions {
 			n.sessions[s.ID] = s
+			h.sessionNode[s.ID] = n.id
 		}
 		h.mu.Unlock()
-		h.syncSessionsToDB(n.name, msg.Sessions)
+		h.syncSessionsToDB(n, msg.Sessions)
 
 	case protocol.TypeOutput:
 		h.broadcastOutput(msg.SessionID, msg.Data)
@@ -176,9 +211,10 @@ func (h *Hub) handleNodeMessage(n *nodeConn, msg *protocol.Message) {
 		if msg.Session != nil {
 			h.mu.Lock()
 			n.sessions[msg.Session.ID] = *msg.Session
+			h.sessionNode[msg.Session.ID] = n.id
 			h.mu.Unlock()
 			h.db.UpsertSession(database.SessionMeta{
-				ID: msg.Session.ID, Node: n.name, Name: msg.Session.Name,
+				ID: msg.Session.ID, Node: n.name, NodeID: n.id, Name: msg.Session.Name,
 				Cwd: msg.Session.Cwd, Shell: msg.Session.Shell, Pid: msg.Session.Pid,
 				Status: "running", CreatedAt: msg.Session.CreatedAt, LastActive: msg.Session.LastActive,
 			})
@@ -201,6 +237,7 @@ func (h *Hub) handleNodeMessage(n *nodeConn, msg *protocol.Message) {
 	case protocol.TypeExited:
 		h.mu.Lock()
 		delete(n.sessions, msg.SessionID)
+		delete(h.sessionNode, msg.SessionID)
 		h.mu.Unlock()
 		h.db.MarkSessionExited(msg.SessionID)
 		h.notifySessionBrowsers(msg.SessionID, `{"type":"exited"}`)
@@ -211,18 +248,18 @@ func (h *Hub) handleNodeMessage(n *nodeConn, msg *protocol.Message) {
 	}
 }
 
-// syncSessionsToDB upserts the live list and marks anything the node no
-// longer knows about (e.g. died while offline) as exited.
-func (h *Hub) syncSessionsToDB(node string, live []protocol.Session) {
+// syncSessionsToDB upserts one node's live list and marks its sessions
+// the node no longer knows about (e.g. died while offline) as exited.
+func (h *Hub) syncSessionsToDB(n *nodeConn, live []protocol.Session) {
 	alive := map[string]bool{}
 	for _, s := range live {
 		alive[s.ID] = true
 		h.db.UpsertSession(database.SessionMeta{
-			ID: s.ID, Node: node, Name: s.Name, Cwd: s.Cwd, Shell: s.Shell,
+			ID: s.ID, Node: n.name, NodeID: n.id, Name: s.Name, Cwd: s.Cwd, Shell: s.Shell,
 			Pid: s.Pid, Status: "running", CreatedAt: s.CreatedAt, LastActive: s.LastActive,
 		})
 	}
-	stored, err := h.db.ListSessions()
+	stored, err := h.db.ListSessionsForNode(n.id)
 	if err != nil {
 		h.log.Error("list sessions", "err", err)
 		return
@@ -234,12 +271,12 @@ func (h *Hub) syncSessionsToDB(node string, live []protocol.Session) {
 	}
 }
 
-func (h *Hub) sendToNode(msg *protocol.Message) error {
+func (h *Hub) sendToNode(nodeID int64, msg *protocol.Message) error {
 	h.mu.Lock()
-	n := h.node
+	n := h.nodes[nodeID]
 	h.mu.Unlock()
 	if n == nil {
-		return errors.New("no PC node connected")
+		return errors.New("PC node is offline")
 	}
 	data, err := json.Marshal(msg)
 	if err != nil {
@@ -249,6 +286,17 @@ func (h *Hub) sendToNode(msg *protocol.Message) error {
 	defer n.writeMu.Unlock()
 	n.conn.SetWriteDeadline(time.Now().Add(writeWait))
 	return n.conn.WriteMessage(websocket.TextMessage, data)
+}
+
+// nodeForSession resolves the routing table entry for a session.
+func (h *Hub) nodeForSession(sessionID string) (int64, error) {
+	h.mu.Lock()
+	id, ok := h.sessionNode[sessionID]
+	h.mu.Unlock()
+	if !ok {
+		return 0, errors.New("session not running on any connected node")
+	}
+	return id, nil
 }
 
 // ---- create/kill (called from the HTTP API) ----
@@ -263,16 +311,16 @@ func (h *Hub) resolveCreate(sessionID string, err error) {
 	}
 }
 
-// CreateSession asks the node to spawn a PTY and waits for the ack.
+// CreateSession asks one node to spawn a PTY and waits for the ack.
 // fromSession, when set, makes the node inherit that session's live cwd.
-func (h *Hub) CreateSession(name, cwd, shell, fromSession string) (string, error) {
+func (h *Hub) CreateSession(nodeID int64, name, cwd, shell, fromSession string) (string, error) {
 	id := newID()
 	ack := make(chan error, 1)
 	h.mu.Lock()
 	h.pendingCreate[id] = ack
 	h.mu.Unlock()
 
-	err := h.sendToNode(&protocol.Message{
+	err := h.sendToNode(nodeID, &protocol.Message{
 		Type: protocol.TypeCreate, SessionID: id, Name: name, Cwd: cwd, Shell: shell,
 		FromSession: fromSession,
 	})
@@ -293,12 +341,16 @@ func (h *Hub) CreateSession(name, cwd, shell, fromSession string) (string, error
 }
 
 func (h *Hub) KillSession(id string) error {
-	return h.sendToNode(&protocol.Message{Type: protocol.TypeKill, SessionID: id})
+	nodeID, err := h.nodeForSession(id)
+	if err != nil {
+		return err
+	}
+	return h.sendToNode(nodeID, &protocol.Message{Type: protocol.TypeKill, SessionID: id})
 }
 
-// ListDir asks the node for the subdirectories of path ("" = home) and
+// ListDir asks a node for the subdirectories of path ("" = home) and
 // waits for the reply. Returns the resolved absolute path and dir names.
-func (h *Hub) ListDir(path string) (string, []string, error) {
+func (h *Hub) ListDir(nodeID int64, path string) (string, []string, error) {
 	reqID := newID()
 	reply := make(chan *protocol.Message, 1)
 	h.mu.Lock()
@@ -310,7 +362,7 @@ func (h *Hub) ListDir(path string) (string, []string, error) {
 		h.mu.Unlock()
 	}
 
-	if err := h.sendToNode(&protocol.Message{Type: protocol.TypeListDir, ConnID: reqID, Cwd: path}); err != nil {
+	if err := h.sendToNode(nodeID, &protocol.Message{Type: protocol.TypeListDir, ConnID: reqID, Cwd: path}); err != nil {
 		drop()
 		return "", nil, err
 	}
@@ -326,18 +378,15 @@ func (h *Hub) ListDir(path string) (string, []string, error) {
 	}
 }
 
-// NodeStatus returns (name, connected) plus the live session list.
-func (h *Hub) NodeStatus() (string, bool, []protocol.Session) {
+// OnlineNodes returns the set of currently connected node ids.
+func (h *Hub) OnlineNodes() map[int64]bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.node == nil {
-		return "", false, nil
+	out := make(map[int64]bool, len(h.nodes))
+	for id := range h.nodes {
+		out[id] = true
 	}
-	out := make([]protocol.Session, 0, len(h.node.sessions))
-	for _, s := range h.node.sessions {
-		out = append(out, s)
-	}
-	return h.node.name, true, out
+	return out
 }
 
 // ---- browser side ----
@@ -350,7 +399,8 @@ func (h *Hub) ServeBrowser(w http.ResponseWriter, r *http.Request, sessionID str
 	if err != nil {
 		return
 	}
-	b := &browserConn{id: newID(), sessionID: sessionID, conn: conn}
+	nodeID, nodeErr := h.nodeForSession(sessionID)
+	b := &browserConn{id: newID(), sessionID: sessionID, nodeID: nodeID, conn: conn}
 
 	h.mu.Lock()
 	if h.browsers[sessionID] == nil {
@@ -361,8 +411,11 @@ func (h *Hub) ServeBrowser(w http.ResponseWriter, r *http.Request, sessionID str
 
 	// Ask the node for the scrollback buffer; output is held back until it
 	// arrives so the replay and the live stream do not interleave.
-	if err := h.sendToNode(&protocol.Message{Type: protocol.TypeAttach, SessionID: sessionID, ConnID: b.id}); err != nil {
-		b.writeText(fmt.Sprintf(`{"type":"error","error":%q}`, err.Error()))
+	if nodeErr == nil {
+		nodeErr = h.sendToNode(nodeID, &protocol.Message{Type: protocol.TypeAttach, SessionID: sessionID, ConnID: b.id})
+	}
+	if nodeErr != nil {
+		b.writeText(fmt.Sprintf(`{"type":"error","error":%q}`, nodeErr.Error()))
 	}
 
 	h.readBrowser(b)
@@ -412,7 +465,7 @@ func (h *Hub) readBrowser(b *browserConn) {
 		}
 		switch mt {
 		case websocket.BinaryMessage:
-			h.sendToNode(&protocol.Message{Type: protocol.TypeInput, SessionID: b.sessionID, Data: data})
+			h.sendToNode(b.nodeID, &protocol.Message{Type: protocol.TypeInput, SessionID: b.sessionID, Data: data})
 		case websocket.TextMessage:
 			var ctl struct {
 				Type string `json:"type"`
@@ -420,7 +473,7 @@ func (h *Hub) readBrowser(b *browserConn) {
 				Rows uint16 `json:"rows"`
 			}
 			if json.Unmarshal(data, &ctl) == nil && ctl.Type == "resize" {
-				h.sendToNode(&protocol.Message{Type: protocol.TypeResize, SessionID: b.sessionID, Cols: ctl.Cols, Rows: ctl.Rows})
+				h.sendToNode(b.nodeID, &protocol.Message{Type: protocol.TypeResize, SessionID: b.sessionID, Cols: ctl.Cols, Rows: ctl.Rows})
 			}
 		}
 	}
@@ -498,16 +551,3 @@ func (h *Hub) closeSessionBrowsers(sessionID string) {
 	}
 }
 
-func (h *Hub) notifyAllBrowsers(jsonMsg string) {
-	h.mu.Lock()
-	targets := []*browserConn{}
-	for _, set := range h.browsers {
-		for b := range set {
-			targets = append(targets, b)
-		}
-	}
-	h.mu.Unlock()
-	for _, b := range targets {
-		b.writeText(jsonMsg)
-	}
-}

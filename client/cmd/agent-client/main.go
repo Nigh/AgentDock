@@ -20,17 +20,19 @@ func main() {
 		fmt.Fprintf(os.Stderr, `agent-client - AgentDock PC node
 
 Usage:
-  agent-client connect --server https://example.com --token XXXX [--name office-pc]
+  agent-client connect --server https://example.com --token adk_XXXX [--name office-pc]
 
-Sessions are created and managed from the web UI. They live as long as
-this process runs; browsers can attach and detach freely.
+The token is your personal node token, generated on the web UI
+dashboard; the node automatically belongs to your account. Sessions
+are created and managed from the web UI. They live as long as this
+process runs; browsers can attach and detach freely.
 `)
 		os.Exit(2)
 	}
 
 	fs := flag.NewFlagSet("connect", flag.ExitOnError)
 	server := fs.String("server", os.Getenv("AGENTDOCK_SERVER"), "server base URL, e.g. https://example.com")
-	token := fs.String("token", os.Getenv("AGENTDOCK_NODE_TOKEN"), "node token (must match the server's AGENTDOCK_NODE_TOKEN)")
+	token := fs.String("token", os.Getenv("AGENTDOCK_NODE_TOKEN"), "personal node token generated on the web UI dashboard")
 	name := fs.String("name", defaultNodeName(), "node display name")
 	fs.Parse(os.Args[2:])
 
