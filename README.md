@@ -68,6 +68,38 @@ example.com {
 
 For plain-http testing only, set `AGENTDOCK_COOKIE_SECURE=false`.
 
+<details>
+<summary>Deploying to a host without a registry (docker save/load)</summary>
+
+If the server host can't pull from a registry, build locally and ship
+the image over SSH:
+
+```bash
+docker build -t agentdock:latest .
+docker save agentdock:latest | gzip | ssh myserver 'gunzip | docker load'
+ssh myserver 'mkdir -p ~/app/agentdock'
+scp docker-compose.yml .env myserver:~/app/agentdock/
+ssh myserver 'cd ~/app/agentdock && docker compose up -d'
+```
+
+Change `build: .` to `image: agentdock:latest` in the remote
+`docker-compose.yml`, bind the port to loopback only
+(`"127.0.0.1:18080:8080"`) and point your reverse proxy at it —
+the container should never be reachable directly from the internet.
+Keep `.env` at mode `600`; it holds the node token and the bootstrap
+password.
+
+</details>
+
+Verify the deployment end to end:
+
+```bash
+curl -s https://example.com/api/state          # 401 = auth is on
+curl -s -X POST https://example.com/api/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"you","password":"..."}'      # {"username":"you"}
+```
+
 ### 2. Client (your PC)
 
 Build (or copy the binary out of the Docker image:
@@ -87,8 +119,38 @@ agent-client connect \
   --name office-pc
 ```
 
-Keep it running with systemd, tmux, or nohup. It reconnects
-automatically with backoff; sessions survive network blips.
+It reconnects automatically with backoff; sessions survive network
+blips. For a permanent setup, run it as a systemd user service so it
+starts on boot and survives logouts:
+
+```ini
+# ~/.config/systemd/user/agent-client.service
+[Unit]
+Description=AgentDock client (PC node)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=%h/.local/bin/agent-client connect --server https://example.com --token <AGENTDOCK_NODE_TOKEN> --name office-pc
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+cp bin/agent-client ~/.local/bin/
+systemctl --user daemon-reload
+systemctl --user enable --now agent-client
+loginctl enable-linger $USER          # keep it running after logout
+journalctl --user -u agent-client -f  # watch logs
+```
+
+Don't run the client in Docker: sessions would see the container's
+filesystem and environment instead of your real repos, shells and
+agent-CLI credentials, which defeats the purpose. The binary is
+static and dependency-free; systemd is all it needs.
 
 ### 3. Browser
 
