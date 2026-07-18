@@ -134,13 +134,22 @@
   <section class="mb-6">
     <div class="mb-3 flex items-center justify-between">
       <h2 class="text-sm font-medium uppercase tracking-wider text-zinc-500">Sessions</h2>
-      <button
-        onclick={() => (showNew = !showNew)}
-        disabled={!node.connected}
-        class="rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-40"
-      >
-        New Session
-      </button>
+      <div class="flex gap-2">
+        <button
+          onclick={() => (location.hash = '#/browse')}
+          disabled={!node.connected}
+          class="rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-800 disabled:opacity-40"
+        >
+          Browse…
+        </button>
+        <button
+          onclick={() => (showNew = !showNew)}
+          disabled={!node.connected}
+          class="rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-40"
+        >
+          New Session
+        </button>
+      </div>
     </div>
 
     {#if showNew}

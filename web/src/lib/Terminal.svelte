@@ -1,9 +1,11 @@
 <script>
   import { Terminal } from '@xterm/xterm';
   import { FitAddon } from '@xterm/addon-fit';
-  import { terminalWsUrl } from './api.js';
+  import { WebglAddon } from '@xterm/addon-webgl';
+  import { api, terminalWsUrl } from './api.js';
 
   let { sessionId, sessionName } = $props();
+  let spawning = $state(false);
 
   let container;
   let status = $state('connecting'); // connecting | connected | closed | exited
@@ -69,6 +71,15 @@
     fit = new FitAddon();
     term.loadAddon(fit);
     term.open(container);
+    // WebGL renderer: much faster than the default DOM renderer,
+    // especially on phones. On failure/context loss fall back to DOM.
+    try {
+      const webgl = new WebglAddon();
+      webgl.onContextLoss(() => webgl.dispose());
+      term.loadAddon(webgl);
+    } catch {
+      /* WebGL unavailable; DOM renderer works, just slower */
+    }
     fit.fit();
     term.focus();
 
@@ -97,6 +108,20 @@
     location.hash = '';
   }
 
+  // spawn a sibling session in this shell's *live* working directory
+  async function newCliHere() {
+    spawning = true;
+    try {
+      const name = (sessionName || 'cli') + '-2';
+      const r = await api.createSession(name, '', '', sessionId);
+      location.hash = `#/session/${r.id}?name=${encodeURIComponent(name)}`;
+    } catch (e) {
+      term.write(`\r\n\x1b[31m[new CLI failed: ${e.message}]\x1b[0m\r\n`);
+    } finally {
+      spawning = false;
+    }
+  }
+
   async function paste() {
     try {
       const text = await navigator.clipboard.readText();
@@ -113,6 +138,10 @@
       ← Back
     </button>
     <div class="min-w-0 flex-1 truncate text-sm font-medium text-white">{sessionName || sessionId.slice(0, 8)}</div>
+    <button onclick={newCliHere} disabled={spawning} title="Open a new CLI in this shell's current directory"
+      class="rounded-lg border border-zinc-700 px-3 py-1 text-sm text-zinc-300 hover:bg-zinc-800 disabled:opacity-50">
+      {spawning ? '…' : '+ CLI here'}
+    </button>
     <button onclick={paste} class="rounded-lg border border-zinc-700 px-3 py-1 text-sm text-zinc-300 hover:bg-zinc-800">
       Paste
     </button>
