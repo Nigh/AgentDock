@@ -54,17 +54,19 @@ type Hub struct {
 
 	mu sync.Mutex
 	// ponytail: single node for the MVP; becomes map[nodeID]*nodeConn for multi-PC
-	node          *nodeConn
-	browsers      map[string]map[*browserConn]bool // sessionID -> attached browsers
-	pendingCreate map[string]chan error            // sessionID -> create ack
+	node           *nodeConn
+	browsers       map[string]map[*browserConn]bool  // sessionID -> attached browsers
+	pendingCreate  map[string]chan error             // sessionID -> create ack
+	pendingListDir map[string]chan *protocol.Message // request ConnID -> dirlist reply
 }
 
 func New(db *database.DB, log *slog.Logger) *Hub {
 	return &Hub{
-		db:            db,
-		log:           log,
-		browsers:      map[string]map[*browserConn]bool{},
-		pendingCreate: map[string]chan error{},
+		db:             db,
+		log:            log,
+		browsers:       map[string]map[*browserConn]bool{},
+		pendingCreate:  map[string]chan error{},
+		pendingListDir: map[string]chan *protocol.Message{},
 	}
 }
 
@@ -187,6 +189,15 @@ func (h *Hub) handleNodeMessage(n *nodeConn, msg *protocol.Message) {
 		h.log.Warn("node error", "session", msg.SessionID, "err", msg.Error)
 		h.resolveCreate(msg.SessionID, errors.New(msg.Error))
 
+	case protocol.TypeDirList:
+		h.mu.Lock()
+		ch := h.pendingListDir[msg.ConnID]
+		delete(h.pendingListDir, msg.ConnID)
+		h.mu.Unlock()
+		if ch != nil {
+			ch <- msg
+		}
+
 	case protocol.TypeExited:
 		h.mu.Lock()
 		delete(n.sessions, msg.SessionID)
@@ -253,7 +264,8 @@ func (h *Hub) resolveCreate(sessionID string, err error) {
 }
 
 // CreateSession asks the node to spawn a PTY and waits for the ack.
-func (h *Hub) CreateSession(name, cwd, shell string) (string, error) {
+// fromSession, when set, makes the node inherit that session's live cwd.
+func (h *Hub) CreateSession(name, cwd, shell, fromSession string) (string, error) {
 	id := newID()
 	ack := make(chan error, 1)
 	h.mu.Lock()
@@ -262,6 +274,7 @@ func (h *Hub) CreateSession(name, cwd, shell string) (string, error) {
 
 	err := h.sendToNode(&protocol.Message{
 		Type: protocol.TypeCreate, SessionID: id, Name: name, Cwd: cwd, Shell: shell,
+		FromSession: fromSession,
 	})
 	if err != nil {
 		h.resolveCreate(id, nil) // drain the pending entry
@@ -281,6 +294,36 @@ func (h *Hub) CreateSession(name, cwd, shell string) (string, error) {
 
 func (h *Hub) KillSession(id string) error {
 	return h.sendToNode(&protocol.Message{Type: protocol.TypeKill, SessionID: id})
+}
+
+// ListDir asks the node for the subdirectories of path ("" = home) and
+// waits for the reply. Returns the resolved absolute path and dir names.
+func (h *Hub) ListDir(path string) (string, []string, error) {
+	reqID := newID()
+	reply := make(chan *protocol.Message, 1)
+	h.mu.Lock()
+	h.pendingListDir[reqID] = reply
+	h.mu.Unlock()
+	drop := func() {
+		h.mu.Lock()
+		delete(h.pendingListDir, reqID)
+		h.mu.Unlock()
+	}
+
+	if err := h.sendToNode(&protocol.Message{Type: protocol.TypeListDir, ConnID: reqID, Cwd: path}); err != nil {
+		drop()
+		return "", nil, err
+	}
+	select {
+	case msg := <-reply:
+		if msg.Error != "" {
+			return "", nil, errors.New(msg.Error)
+		}
+		return msg.Cwd, msg.Dirs, nil
+	case <-time.After(10 * time.Second):
+		drop()
+		return "", nil, errors.New("timeout waiting for PC node")
+	}
 }
 
 // NodeStatus returns (name, connected) plus the live session list.

@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -164,7 +166,16 @@ func (c *Client) runOnce(ctx context.Context, wsURL string) error {
 func (c *Client) handle(msg *protocol.Message) {
 	switch msg.Type {
 	case protocol.TypeCreate:
-		s, err := c.mgr.Create(msg.SessionID, msg.Name, msg.Cwd, msg.Shell)
+		cwd := msg.Cwd
+		if msg.FromSession != "" {
+			live, err := c.mgr.LiveCwd(msg.FromSession)
+			if err != nil {
+				c.send(&protocol.Message{Type: protocol.TypeError, SessionID: msg.SessionID, Error: err.Error()})
+				return
+			}
+			cwd = live
+		}
+		s, err := c.mgr.Create(msg.SessionID, msg.Name, cwd, msg.Shell)
 		if err != nil {
 			c.send(&protocol.Message{Type: protocol.TypeError, SessionID: msg.SessionID, Error: err.Error()})
 			return
@@ -193,9 +204,43 @@ func (c *Client) handle(msg *protocol.Message) {
 			c.log.Warn("kill", "err", err)
 		}
 
+	case protocol.TypeListDir:
+		c.handleListDir(msg)
+
 	default:
 		c.log.Warn("unknown message from server", "type", msg.Type)
 	}
+}
+
+// handleListDir replies with the absolute path and its subdirectories,
+// so the browser can navigate the PC's filesystem graphically.
+func (c *Client) handleListDir(msg *protocol.Message) {
+	dir := msg.Cwd
+	if dir == "" {
+		dir, _ = os.UserHomeDir()
+	}
+	abs, err := filepath.Abs(dir)
+	if err == nil {
+		if resolved, rerr := filepath.EvalSymlinks(abs); rerr == nil {
+			abs = resolved
+		}
+	}
+	entries, err := os.ReadDir(abs)
+	if err != nil {
+		c.send(&protocol.Message{Type: protocol.TypeDirList, ConnID: msg.ConnID, Error: err.Error()})
+		return
+	}
+	dirs := []string{}
+	for _, e := range entries { // ReadDir sorts by name
+		if e.IsDir() {
+			dirs = append(dirs, e.Name())
+		} else if e.Type()&os.ModeSymlink != 0 {
+			if st, serr := os.Stat(filepath.Join(abs, e.Name())); serr == nil && st.IsDir() {
+				dirs = append(dirs, e.Name())
+			}
+		}
+	}
+	c.send(&protocol.Message{Type: protocol.TypeDirList, ConnID: msg.ConnID, Cwd: abs, Dirs: dirs})
 }
 
 func (c *Client) sendSessionList() {

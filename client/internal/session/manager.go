@@ -159,6 +159,20 @@ func (m *Manager) Buffer(id string) ([]byte, error) {
 	return s.ring.Bytes(), nil
 }
 
+// LiveCwd returns the session shell's current working directory.
+// ponytail: Linux-only /proc readlink of the shell pid (not the
+// foreground child); falls back to the spawn cwd where /proc is absent.
+func (m *Manager) LiveCwd(id string) (string, error) {
+	s := m.get(id)
+	if s == nil {
+		return "", fmt.Errorf("no such session: %s", id)
+	}
+	if cwd, err := os.Readlink(fmt.Sprintf("/proc/%d/cwd", s.Pid)); err == nil {
+		return cwd, nil
+	}
+	return s.Cwd, nil
+}
+
 func (m *Manager) Kill(id string) error {
 	s := m.get(id)
 	if s == nil {
