@@ -22,12 +22,9 @@ test:
 	go test ./...
 
 # local dev: server on :8080 with relaxed cookies, web via `cd web && npm run dev`
+# (register the first account in the browser; it becomes the admin)
 dev-server:
-	AGENTDOCK_COOKIE_SECURE=false \
-	AGENTDOCK_NODE_TOKEN=dev-token-not-for-prod \
-	AGENTDOCK_ADMIN_USER=$${AGENTDOCK_ADMIN_USER:-admin} \
-	AGENTDOCK_ADMIN_PASSWORD=$${AGENTDOCK_ADMIN_PASSWORD:-devpassword} \
-	go run ./server/cmd/agent-server
+	AGENTDOCK_COOKIE_SECURE=false go run ./server/cmd/agent-server
 
 clean:
 	rm -rf bin data

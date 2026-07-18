@@ -1,12 +1,14 @@
 # AgentDock
 
-Single-user, multi-device remote control for AI coding agents.
+Multi-user, multi-device remote control for AI coding agents.
 
 Run Cursor CLI, Codex CLI, Claude Code or any other CLI agent on your
 own PC (where your repos, environment and subscriptions live), then
 attach to those terminal sessions from any browser — including your
 phone — through a small public server. Sessions survive browser
 disconnects, tmux-style: close your phone at night, reattach tomorrow.
+Invite friends: each user connects their own PCs and can share them
+with other users.
 
 ```
  phone / laptop browser                 your PC (office / home)
@@ -49,13 +51,13 @@ web/                 Svelte 5 + Vite + Tailwind + xterm.js frontend
 ### 1. Server (public machine)
 
 ```bash
-cp .env.example .env
-# edit .env:
-#   AGENTDOCK_NODE_TOKEN=$(openssl rand -hex 24)
-#   AGENTDOCK_ADMIN_USER=you
-#   AGENTDOCK_ADMIN_PASSWORD=a-strong-password
+cp .env.example .env   # defaults are fine behind an HTTPS proxy
 docker compose up -d
 ```
+
+No credentials to configure: open the web UI and **register — the
+first account becomes the admin**. Anyone registering after that is
+`pending` until the admin approves them on the Admin page.
 
 The server listens on `:8080`. Put it behind an HTTPS reverse proxy
 (Caddy, nginx, Traefik) — websockets must be proxied too. Example Caddy:
@@ -86,8 +88,6 @@ Change `build: .` to `image: agentdock:latest` in the remote
 `docker-compose.yml`, bind the port to loopback only
 (`"127.0.0.1:8080:8080"`) and point your reverse proxy at it —
 the container should never be reachable directly from the internet.
-Keep `.env` at mode `600`; it holds the node token and the bootstrap
-password.
 
 </details>
 
@@ -95,12 +95,14 @@ Verify the deployment end to end:
 
 ```bash
 curl -s https://example.com/api/state          # 401 = auth is on
-curl -s -X POST https://example.com/api/login \
-  -H 'Content-Type: application/json' \
-  -d '{"username":"you","password":"..."}'      # {"username":"you"}
 ```
 
 ### 2. Client (your PC)
+
+Sign in to the web UI and use the **Connect a PC** card on the
+dashboard to generate your personal node token (`adk_...`). The token
+is shown once; the server only stores a hash. A client connecting with
+it automatically belongs to your account.
 
 Build (or copy the binary out of the Docker image:
 `docker cp agentdock-server:/usr/local/bin/agent-client .`):
@@ -115,7 +117,7 @@ Connect:
 ```bash
 agent-client connect \
   --server https://example.com \
-  --token <AGENTDOCK_NODE_TOKEN> \
+  --token adk_XXXXXXXX... \
   --name office-pc
 ```
 
@@ -131,7 +133,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=%h/.local/bin/agent-client connect --server https://example.com --token <AGENTDOCK_NODE_TOKEN> --name office-pc
+ExecStart=%h/.local/bin/agent-client connect --server https://example.com --token adk_XXXX --name office-pc
 Restart=always
 RestartSec=5
 
@@ -154,21 +156,32 @@ static and dependency-free; systemd is all it needs.
 
 ### 3. Browser
 
-Open `https://example.com`, log in, and:
+Open `https://example.com`, sign in, and:
 
 1. See `office-pc` online on the dashboard.
-2. Click **New Session** (or tap a saved directory for a one-tap session).
+2. Click **New Session** on its card, **Browse…** to pick a directory
+   graphically, or tap a saved directory for a one-tap session.
 3. In the terminal: `cd ~/project && cursor` (or `codex`, `claude`, ...).
 4. Close the browser whenever. The session keeps running on your PC.
 5. Reopen later — the terminal is restored with its recent scrollback.
+
+## Users, PCs and sharing
+
+- The first registered account is the **admin**; later registrations
+  need approval on the Admin page before they can sign in.
+- A PC (node) belongs to the user whose token it connects with, and is
+  visible to its owner and to admins.
+- Every user's uid is shown next to their name (`alice #1`). Anyone
+  who can access a node can **share** it with another user by uid from
+  the node card — access is all-or-nothing (see, open and kill every
+  session on that node, and share it onward). Only the node's owner or
+  an admin can revoke a share.
+- Admins can also grant any node to any user from the Admin page.
 
 ## Configuration (server)
 
 | Variable | Required | Default | Purpose |
 |---|---|---|---|
-| `AGENTDOCK_NODE_TOKEN` | yes | – | Shared secret for the PC node (min 16 chars). Generate: `openssl rand -hex 24` |
-| `AGENTDOCK_ADMIN_USER` | first run | – | Bootstrap username (ignored once a user exists) |
-| `AGENTDOCK_ADMIN_PASSWORD` | first run | – | Bootstrap password (min 8 chars, stored bcrypt-hashed) |
 | `AGENTDOCK_ADDR` | no | `:8080` | Listen address |
 | `AGENTDOCK_DB` | no | `./data/agentdock.db` (`/data/agentdock.db` in Docker) | SQLite path |
 | `AGENTDOCK_JWT_SECRET` | no | auto-generated, persisted in SQLite | JWT signing key |
@@ -180,13 +193,17 @@ Client flags (env fallbacks in parentheses): `--server`
 
 ## Security model
 
-- Passwords are bcrypt-hashed; no default credentials exist — the
-  server refuses to start without a bootstrapped user.
+- Passwords are bcrypt-hashed; no default or env-injected credentials
+  exist — the first web registration creates the admin.
+- New accounts are inactive until an admin approves them; approval is
+  re-checked on every request, so revocations apply immediately.
 - Browser sessions use a signed JWT in an `HttpOnly` `SameSite=Lax`
   cookie (7-day expiry); the terminal websocket is authenticated by the
-  same cookie plus an Origin check.
-- The PC node authenticates with a bearer token compared in constant
-  time; wrong tokens get a 401 before any upgrade.
+  same cookie plus an Origin check, and every session/browse/terminal
+  request re-checks node access.
+- Each PC node authenticates with its owner's personal bearer token
+  (`adk_...`, shown once, stored as a SHA-256 hash, revocable by
+  regenerating); wrong tokens get a 401 before any upgrade.
 - State-changing requests pass a same-origin check (CSRF guard).
 - The PC never listens; it only dials out over `wss`.
 
@@ -194,10 +211,10 @@ Client flags (env fallbacks in parentheses): `--server`
 
 ```bash
 make test                      # go vet + all tests (incl. e2e PTY round-trip)
-make dev-server                # server on :8080 (admin/devpassword)
+make dev-server                # server on :8080; register the admin in the browser
 cd web && npm run dev          # Vite dev server on :5173, proxies /api
 go run ./client/cmd/agent-client connect \
-  --server http://localhost:8080 --token dev-token-not-for-prod
+  --server http://localhost:8080 --token <token from the dashboard>
 ```
 
 `make all` builds everything into `bin/` with the frontend embedded in
@@ -210,7 +227,7 @@ go run ./client/cmd/agent-client connect \
   shows them as `exited`. Scrollback replay is a 256 KB in-memory ring
   per session.
 - One flat JSON message envelope (`internal/protocol`) multiplexes all
-  sessions over a single node websocket.
-- The schema and hub already carry `node` and `role` fields; multi-PC,
-  multi-user, and agent-type metadata are deliberate extension points,
-  not implemented features.
+  of a node's sessions over its single websocket; the hub routes each
+  session to the right node.
+- Node access is deliberately all-or-nothing per node; per-session
+  permissions and agent-type metadata remain extension points.

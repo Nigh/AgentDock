@@ -1,8 +1,8 @@
 <script>
   import { api } from './api.js';
 
-  // path lives in the hash (#/browse?path=...) so back/forward walk the tree
-  let { path = '' } = $props();
+  // path lives in the hash (#/browse?node=<id>&path=...) so back/forward walk the tree
+  let { nodeId, path = '' } = $props();
 
   let current = $state('');
   let dirs = $state([]);
@@ -15,7 +15,7 @@
     loading = true;
     error = '';
     api
-      .browse(path)
+      .browse(nodeId, path)
       .then((r) => {
         current = r.path;
         dirs = r.dirs;
@@ -34,7 +34,7 @@
   );
 
   function go(p) {
-    location.hash = `#/browse?path=${encodeURIComponent(p)}`;
+    location.hash = `#/browse?node=${nodeId}&path=${encodeURIComponent(p)}`;
   }
 
   function enter(name) {
@@ -48,7 +48,7 @@
       const name = (current.split('/').filter(Boolean).pop() || 'home')
         .toLowerCase()
         .replace(/[^a-z0-9]+/g, '-');
-      const r = await api.createSession(name, current, '');
+      const r = await api.createSession({ name, nodeId, cwd: current });
       location.hash = `#/session/${r.id}?name=${encodeURIComponent(name)}`;
     } catch (e) {
       error = e.message;
