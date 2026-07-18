@@ -59,58 +59,58 @@
 
 <div class="mx-auto max-w-3xl p-4 pb-16">
   <header class="mb-4 flex items-center gap-3">
-    <button onclick={() => (location.hash = '')} class="rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-800">
+    <button onclick={() => (location.hash = '')} class="rounded-lg border border-base-300 px-3 py-1.5 text-sm text-base-content/80 hover:bg-base-300/30">
       ← Back
     </button>
-    <h1 class="min-w-0 flex-1 truncate text-lg font-bold text-white">Browse</h1>
+    <h1 class="min-w-0 flex-1 truncate text-lg font-bold text-base-content">Browse</h1>
     <button
       onclick={openHere}
       disabled={opening || loading || !current}
-      class="rounded-lg bg-emerald-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-40"
+      class="rounded-lg bg-primary px-4 py-1.5 text-sm font-medium text-primary-content hover:bg-primary/80 disabled:opacity-40"
     >
       {opening ? 'Opening…' : 'Open CLI here'}
     </button>
   </header>
 
   {#if error}
-    <div class="mb-4 rounded-lg bg-red-950/60 px-3 py-2 text-sm text-red-400" role="alert">{error}</div>
+    <div class="mb-4 rounded-lg bg-error/15 px-3 py-2 text-sm text-error" role="alert">{error}</div>
   {/if}
 
   <!-- breadcrumb -->
-  <nav class="mb-4 flex flex-wrap items-center gap-1 rounded-xl border border-zinc-800 bg-zinc-900/60 px-3 py-2 text-sm" aria-label="Path">
-    <button onclick={() => go('/')} class="rounded px-1.5 py-0.5 font-mono text-zinc-400 hover:bg-zinc-800 hover:text-white">/</button>
+  <nav class="mb-4 flex flex-wrap items-center gap-1 rounded-xl border border-base-300/50 bg-base-100/60 px-3 py-2 text-sm" aria-label="Path">
+    <button onclick={() => go('/')} class="rounded px-1.5 py-0.5 font-mono text-base-content/70 hover:bg-base-300/30 hover:text-base-content">/</button>
     {#each crumbs as [seg, p], i (p)}
-      {#if i > 0}<span class="text-zinc-700">/</span>{/if}
-      <button onclick={() => go(p)} class="rounded px-1.5 py-0.5 font-mono {i === crumbs.length - 1 ? 'text-white' : 'text-zinc-400 hover:bg-zinc-800 hover:text-white'}">
+      {#if i > 0}<span class="text-base-content/30">/</span>{/if}
+      <button onclick={() => go(p)} class="rounded px-1.5 py-0.5 font-mono {i === crumbs.length - 1 ? 'text-base-content' : 'text-base-content/70 hover:bg-base-300/30 hover:text-base-content'}">
         {seg}
       </button>
     {/each}
   </nav>
 
-  <label class="mb-3 flex items-center gap-2 text-sm text-zinc-500">
-    <input type="checkbox" bind:checked={showHidden} class="accent-emerald-600" />
+  <label class="mb-3 flex items-center gap-2 text-sm text-base-content/50">
+    <input type="checkbox" bind:checked={showHidden} class="accent-primary" />
     Show hidden
   </label>
 
   {#if loading}
-    <div class="rounded-xl border border-dashed border-zinc-800 p-6 text-center text-sm text-zinc-600">Loading…</div>
+    <div class="rounded-xl border border-dashed border-base-300/50 p-6 text-center text-sm text-base-content/40">Loading…</div>
   {:else}
     <div class="space-y-1">
       {#if current !== '/'}
         <button onclick={() => go(current.replace(/\/[^/]+$/, '') || '/')}
-          class="flex w-full items-center gap-3 rounded-lg border border-zinc-800 bg-zinc-900/60 px-4 py-3 text-left text-sm text-zinc-400 hover:bg-zinc-800">
+          class="flex w-full items-center gap-3 rounded-lg border border-base-300/50 bg-base-100/60 px-4 py-3 text-left text-sm text-base-content/70 hover:bg-base-300/30">
           <span aria-hidden="true">↩</span> ..
         </button>
       {/if}
       {#each visible as d (d)}
         <button onclick={() => enter(d)}
-          class="flex w-full items-center gap-3 rounded-lg border border-zinc-800 bg-zinc-900/60 px-4 py-3 text-left text-sm text-white hover:bg-zinc-800">
-          <span aria-hidden="true" class="text-zinc-500">▸</span>
+          class="flex w-full items-center gap-3 rounded-lg border border-base-300/50 bg-base-100/60 px-4 py-3 text-left text-sm text-base-content hover:bg-base-300/30">
+          <span aria-hidden="true" class="text-base-content/50">▸</span>
           <span class="truncate">{d}</span>
         </button>
       {/each}
       {#if visible.length === 0}
-        <div class="rounded-xl border border-dashed border-zinc-800 p-6 text-center text-sm text-zinc-600">No subdirectories</div>
+        <div class="rounded-xl border border-dashed border-base-300/50 p-6 text-center text-sm text-base-content/40">No subdirectories</div>
       {/if}
     </div>
   {/if}

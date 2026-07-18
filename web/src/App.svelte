@@ -5,6 +5,7 @@
   import Terminal from './lib/Terminal.svelte';
   import Browse from './lib/Browse.svelte';
   import Admin from './lib/Admin.svelte';
+  import ConfirmDialog from './lib/ConfirmDialog.svelte';
 
   let user = $state(null); // { username, uid, role }
   let checking = $state(true);
@@ -32,8 +33,10 @@
   }
 </script>
 
+<ConfirmDialog />
+
 {#if checking}
-  <div class="flex h-full items-center justify-center text-zinc-500">Loading…</div>
+  <div class="flex h-full items-center justify-center text-base-content/50">Loading…</div>
 {:else if !user}
   <Login onlogin={(u) => (user = u)} />
 {:else if sessionMatch}

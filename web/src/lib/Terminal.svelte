@@ -61,11 +61,13 @@
       fontSize: 14,
       fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
       scrollback: 5000,
+      // xianii theme tokens as hex (xterm can't parse oklch):
+      // base-200, base-content, primary, base-300
       theme: {
-        background: '#0a0a0f',
-        foreground: '#e4e4e7',
-        cursor: '#34d399',
-        selectionBackground: '#334155',
+        background: '#161616',
+        foreground: '#f2f2f2',
+        cursor: '#ffa1ad',
+        selectionBackground: '#404040',
       },
     });
     fit = new FitAddon();
@@ -133,22 +135,22 @@
 </script>
 
 <div class="flex h-full flex-col">
-  <header class="flex items-center gap-3 border-b border-zinc-800 bg-zinc-900/80 px-3 py-2">
-    <button onclick={back} class="rounded-lg border border-zinc-700 px-3 py-1 text-sm text-zinc-300 hover:bg-zinc-800">
+  <header class="flex items-center gap-3 border-b border-base-300/50 bg-base-100/80 px-3 py-2">
+    <button onclick={back} class="rounded-lg border border-base-300 px-3 py-1 text-sm text-base-content/80 hover:bg-base-300/30">
       ← Back
     </button>
-    <div class="min-w-0 flex-1 truncate text-sm font-medium text-white">{sessionName || sessionId.slice(0, 8)}</div>
+    <div class="min-w-0 flex-1 truncate text-sm font-medium text-base-content">{sessionName || sessionId.slice(0, 8)}</div>
     <button onclick={newCliHere} disabled={spawning} title="Open a new CLI in this shell's current directory"
-      class="rounded-lg border border-zinc-700 px-3 py-1 text-sm text-zinc-300 hover:bg-zinc-800 disabled:opacity-50">
+      class="rounded-lg border border-base-300 px-3 py-1 text-sm text-base-content/80 hover:bg-base-300/30 disabled:opacity-50">
       {spawning ? '…' : '+ CLI here'}
     </button>
-    <button onclick={paste} class="rounded-lg border border-zinc-700 px-3 py-1 text-sm text-zinc-300 hover:bg-zinc-800">
+    <button onclick={paste} class="rounded-lg border border-base-300 px-3 py-1 text-sm text-base-content/80 hover:bg-base-300/30">
       Paste
     </button>
     <span class="flex items-center gap-1.5 text-xs
-      {status === 'connected' ? 'text-emerald-500' : status === 'exited' ? 'text-zinc-500' : 'text-amber-500'}">
+      {status === 'connected' ? 'text-success' : status === 'exited' ? 'text-base-content/50' : 'text-warning'}">
       <span class="h-2 w-2 rounded-full
-        {status === 'connected' ? 'bg-emerald-500' : status === 'exited' ? 'bg-zinc-600' : 'bg-amber-500 animate-pulse'}"></span>
+        {status === 'connected' ? 'bg-success' : status === 'exited' ? 'bg-base-300' : 'bg-warning animate-pulse'}"></span>
       {status}
     </span>
   </header>
