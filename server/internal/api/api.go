@@ -36,6 +36,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/directories", s.authed(s.handleListDirectories))
 	mux.HandleFunc("POST /api/directories", s.authed(s.handleCreateDirectory))
 	mux.HandleFunc("DELETE /api/directories/{id}", s.authed(s.handleDeleteDirectory))
+	mux.HandleFunc("GET /api/browse", s.authed(s.handleBrowse))
 	mux.HandleFunc("POST /api/sessions", s.authed(s.handleCreateSession))
 	mux.HandleFunc("DELETE /api/sessions/{id}", s.authed(s.handleKillSession))
 	mux.HandleFunc("GET /api/sessions/{id}/ws", s.authed(s.handleBrowserWS))
@@ -191,10 +192,24 @@ func (s *Server) handleDeleteDirectory(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]bool{"ok": true})
 }
 
+// ---- filesystem browsing (proxied to the PC node) ----
+
+func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
+	path, dirs, err := s.Hub.ListDir(r.URL.Query().Get("path"))
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"path": path, "dirs": dirs})
+}
+
 // ---- sessions ----
 
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
-	var req struct{ Name, Cwd, Shell string }
+	var req struct {
+		Name, Cwd, Shell string
+		FromSession      string `json:"from_session"`
+	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad request")
 		return
@@ -203,7 +218,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "name is required")
 		return
 	}
-	id, err := s.Hub.CreateSession(req.Name, req.Cwd, req.Shell)
+	id, err := s.Hub.CreateSession(req.Name, req.Cwd, req.Shell, req.FromSession)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, err.Error())
 		return

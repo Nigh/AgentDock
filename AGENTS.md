@@ -39,8 +39,10 @@ client/
   internal/session/           PTY (creack/pty) manager + 256KB scrollback ring
   internal/ws/                outbound ws, auto-reconnect with backoff
 web/                          Svelte 5 (runes) + Vite + Tailwind 4 + xterm.js
-  src/App.svelte              hash routing: '' dashboard, '#/session/<id>'
-  src/lib/                    Login, Dashboard, Terminal, api.js
+                              (WebGL renderer addon, DOM fallback)
+  src/App.svelte              hash routing: '' dashboard, '#/session/<id>',
+                              '#/browse?path=...' directory browser
+  src/lib/                    Login, Dashboard, Terminal, Browse, api.js
   vite.config.js              outDir -> server/internal/webui/dist
 ```
 
@@ -48,7 +50,10 @@ web/                          Svelte 5 (runes) + Vite + Tailwind 4 + xterm.js
 
 One flat JSON `Message` over a single node websocket, all sessions
 multiplexed. Types: node->server `hello sessions output buffer created
-exited error`; server->node `create input resize kill attach`.
+exited error dirlist`; server->node `create input resize kill attach
+listdir`. `create` may carry `from_session` (spawn in that session's
+live cwd, read from /proc/<pid>/cwd); `listdir`/`dirlist` power the
+web directory browser (request keyed by `ConnID`).
 Browser<->server terminal ws: binary frames = raw terminal bytes, text
 frames = JSON control (`resize` in; `exited`, `node_offline`, `error`
 out). Attach replay ordering: hub holds a browser's output until its
@@ -60,7 +65,9 @@ out). Attach replay ordering: hub holds a browser's output until its
 POST /api/login | POST /api/logout | GET /api/me
 GET  /api/state                     node status + sessions + directories
 GET|POST /api/directories, DELETE /api/directories/{id}
-POST /api/sessions                  waits (10s) for node ack
+GET  /api/browse?path=              subdirs of a path on the PC ("" = home)
+POST /api/sessions                  waits (10s) for node ack; optional
+                                    from_session inherits its live cwd
 DELETE /api/sessions/{id}
 GET  /api/sessions/{id}/ws          browser terminal (cookie + Origin check)
 GET  /api/node/ws                   node (Bearer AGENTDOCK_NODE_TOKEN)
@@ -95,7 +102,8 @@ binaries in the image), `docker-compose.yml` reads `.env`.
 
 - `server/e2e/e2e_test.go` — the main check: real PTY round-trip
   (login, create session, echo, detach, re-attach scrollback replay,
-  kill, exited notice) plus node-token rejection.
+  kill, exited notice), node-token rejection, and directory browsing
+  (`/api/browse` + `from_session` cwd inheritance).
 - `server/internal/auth/auth_test.go` — bcrypt + JWT.
 - `client/internal/session/ring_test.go` — scrollback ring buffer.
 

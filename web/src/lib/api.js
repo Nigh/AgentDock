@@ -24,7 +24,9 @@ export const api = {
   state: () => req('GET', '/api/state'),
   createDirectory: (name, path) => req('POST', '/api/directories', { name, path }),
   deleteDirectory: (id) => req('DELETE', `/api/directories/${id}`),
-  createSession: (name, cwd, shell) => req('POST', '/api/sessions', { name, cwd, shell }),
+  browse: (path) => req('GET', `/api/browse?path=${encodeURIComponent(path || '')}`),
+  createSession: (name, cwd, shell, fromSession) =>
+    req('POST', '/api/sessions', { name, cwd, shell, from_session: fromSession }),
   killSession: (id) => req('DELETE', `/api/sessions/${id}`),
 };
 

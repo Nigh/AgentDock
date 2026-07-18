@@ -14,13 +14,15 @@ const (
 	TypeCreated  = "created"  // session created OK
 	TypeExited   = "exited"   // session process ended
 	TypeError    = "error"    // request failed, Error set
+	TypeDirList  = "dirlist"  // reply to listdir: ConnID, Cwd (abs), Dirs (or Error)
 
 	// server -> node
-	TypeCreate = "create" // create session: SessionID, Name, Cwd, Shell
-	TypeInput  = "input"  // keyboard input: SessionID, Data
-	TypeResize = "resize" // SessionID, Cols, Rows
-	TypeKill   = "kill"   // SessionID
-	TypeAttach = "attach" // SessionID, ConnID: node replies with TypeBuffer
+	TypeCreate  = "create"  // create session: SessionID, Name, Cwd, Shell; FromSession = inherit its live cwd
+	TypeInput   = "input"   // keyboard input: SessionID, Data
+	TypeResize  = "resize"  // SessionID, Cols, Rows
+	TypeKill    = "kill"    // SessionID
+	TypeAttach  = "attach"  // SessionID, ConnID: node replies with TypeBuffer
+	TypeListDir = "listdir" // list subdirectories: ConnID (request id), Cwd ("" = home)
 )
 
 // Session is the metadata for one PTY session, mirroring the spec's
@@ -48,6 +50,9 @@ type Message struct {
 	Name      string    `json:"name,omitempty"`
 	Cwd       string    `json:"cwd,omitempty"`
 	Shell     string    `json:"shell,omitempty"`
+	// FromSession (on create): spawn in that session's live working dir.
+	FromSession string   `json:"from_session,omitempty"`
+	Dirs        []string `json:"dirs,omitempty"`
 	Sessions  []Session `json:"sessions,omitempty"`
 	Session   *Session  `json:"session,omitempty"`
 	Error     string    `json:"error,omitempty"`
