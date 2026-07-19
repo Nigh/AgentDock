@@ -49,6 +49,11 @@ client/
   cmd/agent-client/main.go    `connect` subcommand only
   internal/session/           PTY (creack/pty) manager + 256KB scrollback ring
   internal/ws/                outbound ws, auto-reconnect with backoff
+scripts/
+  install-client.sh           Linux client install+upgrade: git pull, make
+                              client, config asked once into
+                              ~/.config/agentdock/client.env (0600), systemd
+                              user unit via EnvironmentFile, restart
 web/                          Svelte 5 (runes) + Vite + Tailwind 4 + xterm.js
                               (WebGL renderer addon, DOM fallback)
   src/app.css                 xianii color theme (dark), tokens vendored
@@ -110,10 +115,12 @@ row per request, so approval revocation applies immediately.
 
 `AGENTDOCK_ADDR` (:8080), `AGENTDOCK_DB` (./data/agentdock.db;
 /data/agentdock.db in Docker), `AGENTDOCK_JWT_SECRET` (auto-generated,
-persisted in SQLite settings), `AGENTDOCK_COOKIE_SECURE` (true). No
-credential env vars: users register in the web UI, node tokens are
-generated per user on the dashboard. Client: `--server/--token/--name`
-with env fallbacks `AGENTDOCK_SERVER` / `AGENTDOCK_NODE_TOKEN`.
+persisted in SQLite settings), `AGENTDOCK_COOKIE_SECURE` (true), `AGENTDOCK_PUBLISH` (compose-only:
+host publish spec for the container port, `.env.example` defaults to
+127.0.0.1:8080). No credential env vars: users register in the web UI,
+node tokens are generated per user on the dashboard. Client:
+`--server/--token/--name` with env fallbacks `AGENTDOCK_SERVER` /
+`AGENTDOCK_NODE_TOKEN` / `AGENTDOCK_NODE_NAME`.
 
 ## Build & test
 
@@ -163,9 +170,12 @@ extend the e2e test when adding protocol behavior.
 ## Deployment state (reference)
 
 Production: server runs via docker compose behind an HTTPS reverse
-proxy bound to loopback, image shipped via docker save/load (see
-README). Client runs on the dev PC as a systemd user service
-(`~/.config/systemd/user/agent-client.service`, linger enabled).
-Secrets and real hostnames (node token, passwords, domains) live only
-in the server's `.env` and the service unit — never commit them, and
+proxy; the repo is cloned on the host, so updating is `git pull &&
+docker compose up -d --build` (host publish spec via `AGENTDOCK_PUBLISH`
+in `.env`, loopback by default). docker save/load remains a fallback
+for hosts that can't clone (see README). Client runs on the dev PC as
+a systemd user service installed/upgraded by `scripts/install-client.sh`
+(unit reads `~/.config/agentdock/client.env`, linger enabled). Secrets
+and real hostnames (node token, passwords, domains) live only in the
+server's `.env` and the client's `client.env` — never commit them, and
 never write them into this repo's docs.

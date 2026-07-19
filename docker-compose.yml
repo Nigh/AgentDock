@@ -4,7 +4,8 @@ services:
     container_name: agentdock-server
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      # set AGENTDOCK_PUBLISH in .env, e.g. "127.0.0.1:8080" behind a proxy
+      - "${AGENTDOCK_PUBLISH:-8080}:8080"
     environment:
       # No credentials here: the first account registered in the web UI
       # becomes the admin; node tokens are generated per user on the
