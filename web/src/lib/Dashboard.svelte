@@ -7,11 +7,13 @@
   let nodes = $state([]);
   let sessions = $state([]);
   let directories = $state([]);
+  let tokens = $state([]);
   let error = $state('');
 
-  // connect-a-PC card
+  // node-tokens card
   let showConnect = $state(false);
-  let freshToken = $state('');
+  let newTokenName = $state('');
+  let freshToken = $state(''); // plaintext of the last created token, shown once
   let copied = $state(false);
 
   // new-session form (nodeId selects which PC)
@@ -40,6 +42,7 @@
       nodes = s.nodes;
       sessions = s.sessions;
       directories = s.directories;
+      tokens = s.tokens;
       if (!onlineNodes.some((n) => n.id === quickNode)) {
         quickNode = onlineNodes[0]?.id || 0;
       }
@@ -54,17 +57,37 @@
     return () => clearInterval(t);
   });
 
-  async function generateToken() {
+  async function createToken(e) {
+    e.preventDefault();
     error = '';
-    if (freshToken || (await confirmDialog('Generate a new node token? Any previously issued token stops working.', 'Generate'))) {
-      try {
-        const r = await api.nodeToken();
-        freshToken = r.token;
-        copied = false;
-      } catch (e) {
-        error = e.message;
-      }
+    try {
+      const r = await api.createNodeToken(newTokenName);
+      freshToken = r.token;
+      newTokenName = '';
+      copied = false;
+      refresh();
+    } catch (e) {
+      error = e.message;
     }
+  }
+
+  function tokenLabel(t) {
+    return t.name || `token #${t.id}`;
+  }
+
+  // PCs that last connected with this token (owned nodes only)
+  function nodesOfToken(t) {
+    return nodes.filter((n) => n.token_id === t.id);
+  }
+
+  async function deleteToken(t) {
+    const online = nodesOfToken(t).filter((n) => n.connected);
+    const warn = online.length
+      ? ` ${online.map((n) => n.name).join(', ')} will be disconnected.`
+      : '';
+    if (!(await confirmDialog(`Delete ${tokenLabel(t)}? PCs using it can no longer connect.${warn}`, 'Delete'))) return;
+    await api.deleteNodeToken(t.id).catch((e) => (error = e.message));
+    refresh();
   }
 
   const connectCmd = $derived(
@@ -189,30 +212,56 @@
     </div>
   {/if}
 
-  <!-- Connect a PC -->
+  <!-- Node tokens -->
   <section class="mb-6 rounded-xl border border-base-300/50 bg-base-100/60 p-4">
     <div class="flex items-center justify-between">
-      <div class="text-xs font-medium uppercase tracking-wider text-base-content/50">Connect a PC</div>
+      <div class="text-xs font-medium uppercase tracking-wider text-base-content/50">
+        Node Tokens {#if tokens.length}<span class="normal-case tracking-normal">({tokens.length}/16)</span>{/if}
+      </div>
       <button onclick={() => (showConnect = !showConnect)} class="text-sm text-base-content/70 hover:text-base-content">
         {showConnect ? 'Hide' : 'Show'}
       </button>
     </div>
     {#if showConnect}
       <p class="mt-2 text-sm text-base-content/70">
-        Generate your personal node token, then run agent-client on the PC. The node belongs to your
-        account automatically. Regenerating revokes the previous token.
+        Each PC connects with a node token; a node belongs to your account automatically. Create one
+        token per PC so you can revoke them independently (up to 16).
       </p>
-      <div class="mt-3 flex flex-wrap items-center gap-2">
-        <button onclick={generateToken}
-          class="rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-primary-content hover:bg-primary/80">
-          {freshToken ? 'Regenerate token' : 'Generate token'}
+
+      {#if tokens.length}
+        <div class="mt-3 space-y-2">
+          {#each tokens as t (t.id)}
+            <div class="flex flex-wrap items-center gap-2 rounded-lg border border-base-300/50 bg-base-200/40 px-3 py-2">
+              <span class="text-sm font-medium text-base-content">{tokenLabel(t)}</span>
+              {#each nodesOfToken(t) as n (n.id)}
+                <span class="flex items-center gap-1 rounded-full bg-base-300/30 px-2 py-0.5 text-xs text-base-content/80">
+                  <span class="h-1.5 w-1.5 rounded-full {n.connected ? 'bg-success' : 'bg-error'}"></span>{n.name}
+                </span>
+              {:else}
+                <span class="text-xs text-base-content/40">no PC yet</span>
+              {/each}
+              <button onclick={() => deleteToken(t)} aria-label="Delete token {tokenLabel(t)}"
+                class="ml-auto rounded-lg border border-base-300/50 px-2 py-1 text-xs text-base-content/50 hover:text-error">
+                ✕
+              </button>
+            </div>
+          {/each}
+        </div>
+      {/if}
+
+      <form onsubmit={createToken} class="mt-3 flex flex-wrap items-center gap-2">
+        <input bind:value={newTokenName} placeholder="alias, e.g. work-laptop" maxlength="64"
+          class="w-48 rounded-lg border border-base-300 bg-base-300/30 px-3 py-1.5 text-sm text-base-content outline-none focus:border-primary" />
+        <button disabled={tokens.length >= 16}
+          class="rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-primary-content hover:bg-primary/80 disabled:opacity-40">
+          New token
         </button>
         {#if freshToken}
-          <button onclick={copyCmd} class="rounded-lg border border-base-300 px-3 py-1.5 text-sm text-base-content/80 hover:bg-base-300/30">
+          <button type="button" onclick={copyCmd} class="rounded-lg border border-base-300 px-3 py-1.5 text-sm text-base-content/80 hover:bg-base-300/30">
             {copied ? 'Copied' : 'Copy command'}
           </button>
         {/if}
-      </div>
+      </form>
       {#if freshToken}
         <code class="mt-3 block overflow-x-auto rounded-lg bg-base-200 px-3 py-2 text-xs text-primary">{connectCmd}</code>
         <p class="mt-1 text-xs text-warning">Shown once — the server only stores a hash.</p>
@@ -237,6 +286,11 @@
             <span class="h-2.5 w-2.5 rounded-full {n.connected ? 'bg-success' : 'bg-error'}"></span>
             <span class="font-medium text-base-content">{n.name}</span>
             <span class="text-xs text-base-content/50">owner {n.owner} #{n.owner_uid}</span>
+            {#if n.token_name || n.token_id}
+              <span class="rounded-full bg-base-300/30 px-2 py-0.5 text-xs text-base-content/60" title="node token">
+                {n.token_name || `token #${n.token_id}`}
+              </span>
+            {/if}
             <div class="ml-auto flex gap-2">
               <button onclick={() => (shareForNode = shareForNode === n.id ? 0 : n.id)}
                 class="rounded-lg border border-base-300 px-3 py-1 text-sm text-base-content/80 hover:bg-base-300/30">

@@ -102,7 +102,11 @@
       clearTimeout(retryTimer);
       ro.disconnect();
       ws?.close();
-      term.dispose();
+      // The WebGL addon can throw on dispose; an uncaught error here
+      // breaks Svelte's effect flush and leaves the next view dead.
+      try {
+        term.dispose();
+      } catch {}
     };
   });
 

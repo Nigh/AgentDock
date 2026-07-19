@@ -5,6 +5,7 @@ package database
 import (
 	"database/sql"
 	"errors"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -34,14 +35,22 @@ CREATE TABLE IF NOT EXISTS users (
 	password_hash TEXT NOT NULL,
 	role TEXT NOT NULL DEFAULT 'user',      -- 'admin' | 'user'
 	status TEXT NOT NULL DEFAULT 'pending', -- 'pending' | 'active'
-	node_token_hash TEXT,                   -- sha256 of the personal node token
+	node_token_hash TEXT,                   -- legacy single token, migrated to node_tokens
 	created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	last_login_at TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS node_tokens (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	user_id INTEGER NOT NULL,
+	name TEXT NOT NULL DEFAULT '',          -- user-chosen alias
+	token_hash TEXT NOT NULL UNIQUE,        -- sha256 of the plaintext token
+	created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS nodes (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	owner_id INTEGER NOT NULL,
 	name TEXT NOT NULL,
+	token_id INTEGER NOT NULL DEFAULT 0,    -- node token it last connected with
 	last_seen TIMESTAMP,
 	UNIQUE(owner_id, name)
 );
@@ -73,6 +82,23 @@ CREATE TABLE IF NOT EXISTS settings (
 	key TEXT PRIMARY KEY,
 	value TEXT NOT NULL
 );`)
+	if err != nil {
+		return err
+	}
+	// Older DBs: nodes table predates token_id. Ignore "duplicate column".
+	if _, err := db.Exec(`ALTER TABLE nodes ADD COLUMN token_id INTEGER NOT NULL DEFAULT 0`); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column") {
+		return err
+	}
+	// One-shot migration of the legacy single per-user token into
+	// node_tokens; the legacy column is cleared so this never re-runs.
+	if _, err := db.Exec(`INSERT INTO node_tokens(user_id, name, token_hash)
+		SELECT id, 'default', node_token_hash FROM users
+		WHERE node_token_hash IS NOT NULL AND node_token_hash != ''
+		ON CONFLICT(token_hash) DO NOTHING`); err != nil {
+		return err
+	}
+	_, err = db.Exec(`UPDATE users SET node_token_hash = NULL`)
 	return err
 }
 
@@ -139,13 +165,70 @@ func (d *DB) GetUserByID(id int64) (*User, error) {
 	return d.scanUser(d.QueryRow(`SELECT `+userCols+` FROM users WHERE id = ?`, id))
 }
 
-func (d *DB) GetUserByTokenHash(hash string) (*User, error) {
-	return d.scanUser(d.QueryRow(`SELECT `+userCols+` FROM users WHERE node_token_hash = ?`, hash))
+// ---- node tokens (multiple per user) ----
+
+type NodeToken struct {
+	ID        int64     `json:"id"`
+	UserID    int64     `json:"-"`
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
-func (d *DB) SetNodeTokenHash(userID int64, hash string) error {
-	_, err := d.Exec(`UPDATE users SET node_token_hash = ? WHERE id = ?`, hash, userID)
+func (d *DB) CreateNodeToken(userID int64, name, hash string) (int64, error) {
+	res, err := d.Exec(`INSERT INTO node_tokens(user_id, name, token_hash) VALUES(?,?,?)`, userID, name, hash)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+func (d *DB) CountNodeTokens(userID int64) (int, error) {
+	var n int
+	err := d.QueryRow(`SELECT COUNT(*) FROM node_tokens WHERE user_id = ?`, userID).Scan(&n)
+	return n, err
+}
+
+func (d *DB) ListNodeTokens(userID int64) ([]NodeToken, error) {
+	rows, err := d.Query(`SELECT id, user_id, name, created_at FROM node_tokens WHERE user_id = ? ORDER BY id`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []NodeToken{}
+	for rows.Next() {
+		var t NodeToken
+		if err := rows.Scan(&t.ID, &t.UserID, &t.Name, &t.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// GetNodeTokenByHash resolves a presented token to its row (nil if unknown).
+func (d *DB) GetNodeTokenByHash(hash string) (*NodeToken, error) {
+	t := &NodeToken{}
+	err := d.QueryRow(`SELECT id, user_id, name, created_at FROM node_tokens WHERE token_hash = ?`, hash).
+		Scan(&t.ID, &t.UserID, &t.Name, &t.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return t, err
+}
+
+func (d *DB) DeleteNodeToken(id, userID int64) error {
+	_, err := d.Exec(`DELETE FROM node_tokens WHERE id = ? AND user_id = ?`, id, userID)
 	return err
+}
+
+// NodeTokenName returns the alias of a token, "" if it no longer exists.
+func (d *DB) NodeTokenName(id int64) (string, error) {
+	var name string
+	err := d.QueryRow(`SELECT name FROM node_tokens WHERE id = ?`, id).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return name, err
 }
 
 func (d *DB) ListUsers() ([]User, error) {
@@ -178,6 +261,7 @@ func (d *DB) DeleteUser(id int64) error {
 		`DELETE FROM node_access WHERE node_id IN (SELECT id FROM nodes WHERE owner_id = ?)`,
 		`DELETE FROM sessions WHERE node_id IN (SELECT id FROM nodes WHERE owner_id = ?)`,
 		`DELETE FROM directories WHERE user_id = ?`,
+		`DELETE FROM node_tokens WHERE user_id = ?`,
 		`DELETE FROM nodes WHERE owner_id = ?`,
 		`DELETE FROM users WHERE id = ?`,
 	}
@@ -200,14 +284,15 @@ type Node struct {
 	ID      int64  `json:"id"`
 	OwnerID int64  `json:"owner_uid"`
 	Name    string `json:"name"`
+	TokenID int64  `json:"token_id"`
 }
 
-// UpsertNode registers (or refreshes) a node identified by owner+name
-// and returns its stable id.
-func (d *DB) UpsertNode(ownerID int64, name string) (int64, error) {
-	_, err := d.Exec(`INSERT INTO nodes(owner_id, name, last_seen) VALUES(?,?,?)
-		ON CONFLICT(owner_id, name) DO UPDATE SET last_seen=excluded.last_seen`,
-		ownerID, name, time.Now().UTC())
+// UpsertNode registers (or refreshes) a node identified by owner+name,
+// remembers which token it connected with, and returns its stable id.
+func (d *DB) UpsertNode(ownerID int64, name string, tokenID int64) (int64, error) {
+	_, err := d.Exec(`INSERT INTO nodes(owner_id, name, token_id, last_seen) VALUES(?,?,?,?)
+		ON CONFLICT(owner_id, name) DO UPDATE SET token_id=excluded.token_id, last_seen=excluded.last_seen`,
+		ownerID, name, tokenID, time.Now().UTC())
 	if err != nil {
 		return 0, err
 	}
@@ -218,7 +303,8 @@ func (d *DB) UpsertNode(ownerID int64, name string) (int64, error) {
 
 func (d *DB) GetNode(id int64) (*Node, error) {
 	n := &Node{}
-	err := d.QueryRow(`SELECT id, owner_id, name FROM nodes WHERE id = ?`, id).Scan(&n.ID, &n.OwnerID, &n.Name)
+	err := d.QueryRow(`SELECT id, owner_id, name, token_id FROM nodes WHERE id = ?`, id).
+		Scan(&n.ID, &n.OwnerID, &n.Name, &n.TokenID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -227,7 +313,7 @@ func (d *DB) GetNode(id int64) (*Node, error) {
 
 // ListNodesForUser: everything for admins, owned + shared for others.
 func (d *DB) ListNodesForUser(userID int64, isAdmin bool) ([]Node, error) {
-	q := `SELECT id, owner_id, name FROM nodes
+	q := `SELECT id, owner_id, name, token_id FROM nodes
 		WHERE ? OR owner_id = ? OR id IN (SELECT node_id FROM node_access WHERE user_id = ?)
 		ORDER BY name`
 	rows, err := d.Query(q, isAdmin, userID, userID)
@@ -238,7 +324,7 @@ func (d *DB) ListNodesForUser(userID int64, isAdmin bool) ([]Node, error) {
 	out := []Node{}
 	for rows.Next() {
 		var n Node
-		if err := rows.Scan(&n.ID, &n.OwnerID, &n.Name); err != nil {
+		if err := rows.Scan(&n.ID, &n.OwnerID, &n.Name, &n.TokenID); err != nil {
 			return nil, err
 		}
 		out = append(out, n)
