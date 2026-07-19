@@ -51,16 +51,27 @@ web/                 Svelte 5 + Vite + Tailwind + xterm.js frontend
 ### 1. Server (public machine)
 
 ```bash
+git clone <this repo> && cd agentdock
 cp .env.example .env   # defaults are fine behind an HTTPS proxy
 docker compose up -d
 ```
+
+To update later:
+
+```bash
+git pull && docker compose up -d --build
+```
+
+The host port (and bind address) comes from `AGENTDOCK_PUBLISH` in
+`.env` — the default `127.0.0.1:8080` keeps the container reachable
+only through your reverse proxy.
 
 No credentials to configure: open the web UI and **register — the
 first account becomes the admin**. Anyone registering after that is
 `pending` until the admin approves them on the Admin page.
 
-The server listens on `:8080`. Put it behind an HTTPS reverse proxy
-(Caddy, nginx, Traefik) — websockets must be proxied too. Example Caddy:
+Put it behind an HTTPS reverse proxy (Caddy, nginx, Traefik) —
+websockets must be proxied too. Example Caddy:
 
 ```
 example.com {
@@ -85,9 +96,8 @@ ssh myserver 'cd ~/app/agentdock && docker compose up -d'
 ```
 
 Change `build: .` to `image: agentdock:latest` in the remote
-`docker-compose.yml`, bind the port to loopback only
-(`"127.0.0.1:8080:8080"`) and point your reverse proxy at it —
-the container should never be reachable directly from the internet.
+`docker-compose.yml`; the default `AGENTDOCK_PUBLISH=127.0.0.1:8080`
+already keeps the port loopback-only for your reverse proxy.
 
 </details>
 
@@ -104,49 +114,30 @@ dashboard to generate your personal node token (`adk_...`). The token
 is shown once; the server only stores a hash. A client connecting with
 it automatically belongs to your account.
 
-Build (or copy the binary out of the Docker image:
-`docker cp agentdock-server:/usr/local/bin/agent-client .`):
+On Linux, one script installs *and* upgrades (needs Go; run it again
+any time to update):
 
 ```bash
-make client        # -> bin/agent-client
-# or cross compile: make client-all
+./scripts/install-client.sh
 ```
 
-Connect:
+First run it asks for the server URL, token and node name and stores
+them in `~/.config/agentdock/client.env` (mode 0600); then — and on
+every later run — it does `git pull`, rebuilds, installs the binary to
+`~/.local/bin` and (re)starts a systemd user service (with
+`loginctl enable-linger` so it survives logouts). Watch logs with
+`journalctl --user -u agent-client -f`.
+
+Manual alternative (macOS, or if you prefer your own service manager) —
+build the binary and connect; it reconnects automatically with backoff,
+and sessions survive network blips:
 
 ```bash
-agent-client connect \
+make client        # -> bin/agent-client (or: make client-all to cross compile)
+bin/agent-client connect \
   --server https://example.com \
   --token adk_XXXXXXXX... \
   --name office-pc
-```
-
-It reconnects automatically with backoff; sessions survive network
-blips. For a permanent setup, run it as a systemd user service so it
-starts on boot and survives logouts:
-
-```ini
-# ~/.config/systemd/user/agent-client.service
-[Unit]
-Description=AgentDock client (PC node)
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-ExecStart=%h/.local/bin/agent-client connect --server https://example.com --token adk_XXXX --name office-pc
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=default.target
-```
-
-```bash
-cp bin/agent-client ~/.local/bin/
-systemctl --user daemon-reload
-systemctl --user enable --now agent-client
-loginctl enable-linger $USER          # keep it running after logout
-journalctl --user -u agent-client -f  # watch logs
 ```
 
 Don't run the client in Docker: sessions would see the container's
@@ -186,10 +177,11 @@ Open `https://example.com`, sign in, and:
 | `AGENTDOCK_DB` | no | `./data/agentdock.db` (`/data/agentdock.db` in Docker) | SQLite path |
 | `AGENTDOCK_JWT_SECRET` | no | auto-generated, persisted in SQLite | JWT signing key |
 | `AGENTDOCK_COOKIE_SECURE` | no | `true` | Set `false` only for plain-http testing |
+| `AGENTDOCK_PUBLISH` | no | `8080` (`.env.example` sets `127.0.0.1:8080`) | Docker-compose only: host port or `ip:port` to publish |
 
 Client flags (env fallbacks in parentheses): `--server`
 (`AGENTDOCK_SERVER`), `--token` (`AGENTDOCK_NODE_TOKEN`), `--name`
-(hostname by default).
+(`AGENTDOCK_NODE_NAME`, hostname by default).
 
 ## Security model
 

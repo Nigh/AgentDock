@@ -63,6 +63,9 @@ process runs; browsers can attach and detach freely.
 }
 
 func defaultNodeName() string {
+	if n := os.Getenv("AGENTDOCK_NODE_NAME"); n != "" {
+		return n
+	}
 	if h, err := os.Hostname(); err == nil {
 		return h
 	}
