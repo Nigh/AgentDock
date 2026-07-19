@@ -1,14 +1,21 @@
 # ---- web build ----
 FROM node:24-alpine AS web
+# override for hosts that can't reach registry.npmjs.org,
+# e.g. NPM_REGISTRY=https://registry.npmmirror.com
+ARG NPM_REGISTRY=https://registry.npmjs.org
 WORKDIR /src/web
 COPY web/package.json web/package-lock.json ./
-RUN npm ci
+RUN npm ci --registry=$NPM_REGISTRY
 COPY web/ ./
 # vite outDir points at ../server/internal/webui/dist
 RUN mkdir -p ../server/internal/webui && npm run build
 
 # ---- go build ----
 FROM golang:1.25-alpine AS build
+# override for hosts that can't reach proxy.golang.org,
+# e.g. GOPROXY=https://goproxy.cn,direct
+ARG GOPROXY=https://proxy.golang.org,direct
+ENV GOPROXY=$GOPROXY
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download

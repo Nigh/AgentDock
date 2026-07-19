@@ -1,6 +1,12 @@
 services:
   agent-server:
-    build: .
+    build:
+      context: .
+      args:
+        # Go module proxy for the build; set in .env if the default is
+        # unreachable from your host (e.g. https://goproxy.cn,direct).
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org}
     container_name: agentdock-server
     restart: unless-stopped
     ports:
