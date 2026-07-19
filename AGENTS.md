@@ -51,11 +51,17 @@ client/
   internal/ws/                outbound ws, auto-reconnect with backoff
 web/                          Svelte 5 (runes) + Vite + Tailwind 4 + xterm.js
                               (WebGL renderer addon, DOM fallback)
+  src/app.css                 xianii color theme (dark), tokens vendored
+                              from github.com/Nigh/xianii-theme as plain
+                              Tailwind @theme vars (no daisyUI dep)
   src/App.svelte              hash routing: '' dashboard, '#/session/<id>',
-                              '#/browse?node=<id>&path=...', '#/admin'
+                              '#/browse?node=<id>&path=...', '#/admin';
+                              mounts the global ConfirmDialog
   src/lib/                    Login (register toggle), Dashboard (node
                               cards, token card, share), Admin, Terminal,
-                              Browse, api.js
+                              Browse, api.js, confirm.svelte.js +
+                              ConfirmDialog.svelte (promise-based modal on
+                              native <dialog>, replaces window.confirm)
   vite.config.js              outDir -> server/internal/webui/dist
 ```
 

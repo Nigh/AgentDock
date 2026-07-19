@@ -1,14 +1,44 @@
 @import 'tailwindcss';
 @import '@xterm/xterm/css/xterm.css';
 
+/* xianii color theme (dark variant), tokens vendored from
+   https://github.com/Nigh/xianii-theme packages/design-system/theme.css.
+   ponytail: copied as plain Tailwind @theme vars instead of adding the
+   daisyUI dependency the upstream package expects; upgrade path is
+   `npm i daisyui @xianii/design-system` and importing its theme.css. */
+@theme {
+  --color-base-100: oklch(26% 0 0);
+  --color-base-200: oklch(20% 0 0);
+  --color-base-300: oklch(37% 0 0);
+  --color-base-content: oklch(96% 0.001 286.375);
+  --color-primary: oklch(81% 0.117 11.638);
+  --color-primary-content: oklch(26% 0 0);
+  --color-secondary: oklch(82% 0.119 306.383);
+  --color-secondary-content: oklch(26% 0 0);
+  --color-accent: oklch(80% 0.08 185);
+  --color-accent-content: oklch(26% 0 0);
+  --color-neutral: #44403c;
+  --color-neutral-content: oklch(98% 0 0);
+  --color-info: oklch(75% 0.1 250);
+  --color-info-content: oklch(25% 0.02 250);
+  --color-success: oklch(75% 0.1 150);
+  --color-success-content: oklch(25% 0.02 150);
+  --color-warning: oklch(82% 0.14 85);
+  --color-warning-content: oklch(25% 0.03 85);
+  --color-error: oklch(70% 0.18 25);
+  --color-error-content: oklch(20% 0.02 25);
+  --font-sans: 'Inter', 'Noto Sans SC', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', ui-monospace, 'Cascadia Code', monospace;
+}
+
 :root {
   color-scheme: dark;
 }
 
 body {
-  background: #0a0a0f;
-  color: #e4e4e7;
-  font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+  background: var(--color-base-200);
+  color: var(--color-base-content);
+  font-family: var(--font-sans);
   overscroll-behavior: none;
 }
 
