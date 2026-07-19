@@ -117,7 +117,9 @@ row per request, so approval revocation applies immediately.
 /data/agentdock.db in Docker), `AGENTDOCK_JWT_SECRET` (auto-generated,
 persisted in SQLite settings), `AGENTDOCK_COOKIE_SECURE` (true), `AGENTDOCK_PUBLISH` (compose-only:
 host publish spec for the container port, `.env.example` defaults to
-127.0.0.1:8080). No credential env vars: users register in the web UI,
+127.0.0.1:8080). Compose build args `GOPROXY` / `NPM_REGISTRY`
+(mirrors for hosts that can't reach proxy.golang.org /
+registry.npmjs.org). No credential env vars: users register in the web UI,
 node tokens are generated per user on the dashboard. Client:
 `--server/--token/--name` with env fallbacks `AGENTDOCK_SERVER` /
 `AGENTDOCK_NODE_TOKEN` / `AGENTDOCK_NODE_NAME`.
