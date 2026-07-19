@@ -109,10 +109,13 @@ curl -s https://example.com/api/state          # 401 = auth is on
 
 ### 2. Client (your PC)
 
-Sign in to the web UI and use the **Connect a PC** card on the
-dashboard to generate your personal node token (`adk_...`). The token
-is shown once; the server only stores a hash. A client connecting with
-it automatically belongs to your account.
+Sign in to the web UI and use the **Node Tokens** card on the
+dashboard to create a node token (`adk_...`), optionally with an
+alias like `work-laptop`. The token is shown once; the server only
+stores a hash. A client connecting with it automatically belongs to
+your account. You can hold up to 16 tokens — create one per PC so
+deleting a token (which kicks and locks out its PCs) never affects
+the others.
 
 On Linux, one script installs *and* upgrades (needs Go; run it again
 any time to update):
@@ -193,9 +196,10 @@ Client flags (env fallbacks in parentheses): `--server`
   cookie (7-day expiry); the terminal websocket is authenticated by the
   same cookie plus an Origin check, and every session/browse/terminal
   request re-checks node access.
-- Each PC node authenticates with its owner's personal bearer token
-  (`adk_...`, shown once, stored as a SHA-256 hash, revocable by
-  regenerating); wrong tokens get a 401 before any upgrade.
+- Each PC node authenticates with one of its owner's bearer tokens
+  (`adk_...`, shown once, stored as a SHA-256 hash, max 16 per user,
+  individually revocable — deleting a token disconnects its PCs);
+  wrong tokens get a 401 before any upgrade.
 - State-changing requests pass a same-origin check (CSRF guard).
 - The PC never listens; it only dials out over `wss`.
 

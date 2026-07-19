@@ -35,7 +35,8 @@ var upgrader = websocket.Upgrader{
 
 type nodeConn struct {
 	id       int64 // db node id, assigned on hello
-	ownerID  int64 // authenticated owner (from the personal node token)
+	ownerID  int64 // authenticated owner (from the node token)
+	tokenID  int64 // db id of the node token this connection used
 	name     string
 	conn     *websocket.Conn
 	writeMu  sync.Mutex
@@ -84,14 +85,14 @@ func newID() string {
 // ---- node side ----
 
 // ServeNode upgrades and runs the websocket for an agent-client owned
-// by ownerID (already authenticated via its personal node token).
-func (h *Hub) ServeNode(w http.ResponseWriter, r *http.Request, ownerID int64) {
+// by ownerID (already authenticated via one of its node tokens).
+func (h *Hub) ServeNode(w http.ResponseWriter, r *http.Request, ownerID, tokenID int64) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		h.log.Error("node upgrade failed", "err", err)
 		return
 	}
-	n := &nodeConn{ownerID: ownerID, conn: conn, sessions: map[string]protocol.Session{}}
+	n := &nodeConn{ownerID: ownerID, tokenID: tokenID, conn: conn, sessions: map[string]protocol.Session{}}
 
 	h.log.Info("node connected", "remote", r.RemoteAddr, "owner", ownerID)
 	h.readNode(n)
@@ -170,7 +171,7 @@ func (h *Hub) handleNodeMessage(n *nodeConn, msg *protocol.Message) {
 		if name == "" {
 			name = "unnamed"
 		}
-		id, err := h.db.UpsertNode(n.ownerID, name)
+		id, err := h.db.UpsertNode(n.ownerID, name, n.tokenID)
 		if err != nil {
 			h.log.Error("upsert node", "err", err)
 			n.conn.Close()
@@ -387,6 +388,22 @@ func (h *Hub) OnlineNodes() map[int64]bool {
 		out[id] = true
 	}
 	return out
+}
+
+// DisconnectToken closes every node connection that authenticated with
+// the given token (called when the token is deleted).
+func (h *Hub) DisconnectToken(tokenID int64) {
+	h.mu.Lock()
+	var conns []*websocket.Conn
+	for _, n := range h.nodes {
+		if n.tokenID == tokenID {
+			conns = append(conns, n.conn)
+		}
+	}
+	h.mu.Unlock()
+	for _, c := range conns {
+		c.Close()
+	}
 }
 
 // ---- browser side ----

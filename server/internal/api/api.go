@@ -35,7 +35,9 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/login", s.handleLogin)
 	mux.HandleFunc("POST /api/logout", s.handleLogout)
 	mux.HandleFunc("GET /api/me", s.authed(s.handleMe))
-	mux.HandleFunc("POST /api/me/node-token", s.authed(s.handleNodeToken))
+	mux.HandleFunc("GET /api/me/node-tokens", s.authed(s.handleListNodeTokens))
+	mux.HandleFunc("POST /api/me/node-tokens", s.authed(s.handleCreateNodeToken))
+	mux.HandleFunc("DELETE /api/me/node-tokens/{id}", s.authed(s.handleDeleteNodeToken))
 	mux.HandleFunc("GET /api/state", s.authed(s.handleState))
 	mux.HandleFunc("GET /api/users", s.authed(s.handleListUsers))
 	mux.HandleFunc("POST /api/users/{id}/approve", s.authed(s.handleApproveUser))
@@ -193,19 +195,64 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request, u *database.Us
 	writeJSON(w, map[string]any{"username": u.Username, "uid": u.ID, "role": u.Role})
 }
 
-// handleNodeToken (re)generates the caller's personal node token. The
-// plaintext is returned exactly once; only its sha256 is stored, and any
-// previously issued token stops working.
-func (s *Server) handleNodeToken(w http.ResponseWriter, r *http.Request, u *database.User) {
-	b := make([]byte, 24)
-	rand.Read(b)
-	token := "adk_" + hex.EncodeToString(b)
-	if err := s.DB.SetNodeTokenHash(u.ID, hashToken(token)); err != nil {
+// maxNodeTokens caps how many live node tokens one user may hold.
+const maxNodeTokens = 16
+
+func (s *Server) handleListNodeTokens(w http.ResponseWriter, r *http.Request, u *database.User) {
+	tokens, err := s.DB.ListNodeTokens(u.ID)
+	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	s.Log.Info("node token generated", "user", u.Username)
-	writeJSON(w, map[string]string{"token": token})
+	writeJSON(w, tokens)
+}
+
+// handleCreateNodeToken mints a new node token with an optional alias.
+// The plaintext is returned exactly once; only its sha256 is stored.
+func (s *Server) handleCreateNodeToken(w http.ResponseWriter, r *http.Request, u *database.User) {
+	var req struct{ Name string }
+	if r.Body != nil {
+		json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req) // alias is optional
+	}
+	req.Name = strings.TrimSpace(req.Name)
+	if len(req.Name) > 64 {
+		writeErr(w, http.StatusBadRequest, "alias too long (max 64 chars)")
+		return
+	}
+	if n, err := s.DB.CountNodeTokens(u.ID); err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal error")
+		return
+	} else if n >= maxNodeTokens {
+		writeErr(w, http.StatusBadRequest, "token limit reached (16); delete one first")
+		return
+	}
+	b := make([]byte, 24)
+	rand.Read(b)
+	token := "adk_" + hex.EncodeToString(b)
+	id, err := s.DB.CreateNodeToken(u.ID, req.Name, hashToken(token))
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	s.Log.Info("node token created", "user", u.Username, "name", req.Name, "id", id)
+	writeJSON(w, map[string]any{"id": id, "name": req.Name, "token": token})
+}
+
+// handleDeleteNodeToken revokes one token and kicks any PC that is
+// currently connected with it.
+func (s *Server) handleDeleteNodeToken(w http.ResponseWriter, r *http.Request, u *database.User) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "bad id")
+		return
+	}
+	if err := s.DB.DeleteNodeToken(id, u.ID); err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	s.Hub.DisconnectToken(id)
+	s.Log.Info("node token deleted", "user", u.Username, "id", id)
+	writeJSON(w, map[string]bool{"ok": true})
 }
 
 func hashToken(token string) string {
@@ -225,6 +272,7 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request, u *database
 	type nodeView struct {
 		database.Node
 		Owner     string          `json:"owner"`
+		TokenName string          `json:"token_name"`
 		Connected bool            `json:"connected"`
 		Shares    []database.User `json:"shares"`
 	}
@@ -233,6 +281,9 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request, u *database
 		nv := nodeView{Node: n, Connected: online[n.ID]}
 		if owner, err := s.DB.GetUserByID(n.OwnerID); err == nil && owner != nil {
 			nv.Owner = owner.Username
+		}
+		if name, err := s.DB.NodeTokenName(n.TokenID); err == nil {
+			nv.TokenName = name
 		}
 		if shares, err := s.DB.ListNodeShares(n.ID); err == nil {
 			nv.Shares = shares
@@ -249,11 +300,17 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request, u *database
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+	tokens, err := s.DB.ListNodeTokens(u.ID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal error")
+		return
+	}
 	writeJSON(w, map[string]any{
 		"me":          map[string]any{"username": u.Username, "uid": u.ID, "role": u.Role},
 		"nodes":       nodeViews,
 		"sessions":    sessions,
 		"directories": dirs,
+		"tokens":      tokens,
 	})
 }
 
@@ -557,15 +614,24 @@ func (s *Server) handleBrowserWS(w http.ResponseWriter, r *http.Request, u *data
 	s.Hub.ServeBrowser(w, r, sess.ID)
 }
 
-// handleNodeWS authenticates an agent-client by its owner's personal
-// node token (Bearer) and hands the connection to the hub.
+// handleNodeWS authenticates an agent-client by one of its owner's
+// node tokens (Bearer) and hands the connection to the hub.
 func (s *Server) handleNodeWS(w http.ResponseWriter, r *http.Request) {
 	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if token == "" {
 		writeErr(w, http.StatusUnauthorized, "invalid node token")
 		return
 	}
-	owner, err := s.DB.GetUserByTokenHash(hashToken(token))
+	tok, err := s.DB.GetNodeTokenByHash(hashToken(token))
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if tok == nil {
+		writeErr(w, http.StatusUnauthorized, "invalid node token")
+		return
+	}
+	owner, err := s.DB.GetUserByID(tok.UserID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
@@ -574,7 +640,7 @@ func (s *Server) handleNodeWS(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "invalid node token")
 		return
 	}
-	s.Hub.ServeNode(w, r, owner.ID)
+	s.Hub.ServeNode(w, r, owner.ID, tok.ID)
 }
 
 // ---- static SPA ----

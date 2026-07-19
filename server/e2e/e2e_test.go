@@ -115,13 +115,16 @@ func login(t *testing.T, ts *httptest.Server, user, pass string) string {
 	return ""
 }
 
-func nodeToken(t *testing.T, ts *httptest.Server, cookie string) string {
+func nodeToken(t *testing.T, ts *httptest.Server, cookie, alias string) (int64, string) {
 	t.Helper()
-	var out struct{ Token string }
-	if code := doJSON(t, ts, cookie, "POST", "/api/me/node-token", nil, &out); code != 200 || out.Token == "" {
+	var out struct {
+		ID    int64
+		Token string
+	}
+	if code := doJSON(t, ts, cookie, "POST", "/api/me/node-tokens", map[string]string{"name": alias}, &out); code != 200 || out.Token == "" {
 		t.Fatalf("node token: status %d token %q", code, out.Token)
 	}
-	return out.Token
+	return out.ID, out.Token
 }
 
 type stateView struct {
@@ -129,9 +132,12 @@ type stateView struct {
 		ID        int64  `json:"id"`
 		Name      string `json:"name"`
 		OwnerUID  int64  `json:"owner_uid"`
+		TokenID   int64  `json:"token_id"`
+		TokenName string `json:"token_name"`
 		Connected bool   `json:"connected"`
 	} `json:"nodes"`
 	Sessions []database.SessionMeta `json:"sessions"`
+	Tokens   []database.NodeToken   `json:"tokens"`
 }
 
 // waitNodeOnline polls /api/state until the named node is connected.
@@ -201,10 +207,71 @@ func adminStack(t *testing.T) (*httptest.Server, *database.DB, string, int64) {
 		t.Fatalf("first user status = %s, want active", st)
 	}
 	cookie := login(t, ts, adminUser, adminPass)
-	tok := nodeToken(t, ts, cookie)
+	_, tok := nodeToken(t, ts, cookie, "default")
 	startClient(t, ts, tok, "test-pc")
 	nodeID := waitNodeOnline(t, ts, cookie, "test-pc")
 	return ts, db, cookie, nodeID
+}
+
+// TestMultipleNodeTokens: a second token drives a second PC, the state
+// view links nodes to tokens, deleting a token kicks its PC, and the
+// 16-token cap holds.
+func TestMultipleNodeTokens(t *testing.T) {
+	ts, _, cookie, _ := adminStack(t)
+
+	tokID, tok2 := nodeToken(t, ts, cookie, "laptop")
+	startClient(t, ts, tok2, "second-pc")
+	waitNodeOnline(t, ts, cookie, "second-pc")
+
+	var st stateView
+	doJSON(t, ts, cookie, "GET", "/api/state", nil, &st)
+	if len(st.Tokens) != 2 {
+		t.Fatalf("tokens = %d, want 2", len(st.Tokens))
+	}
+	for _, n := range st.Nodes {
+		if n.Name == "second-pc" && (n.TokenID != tokID || n.TokenName != "laptop") {
+			t.Fatalf("second-pc token = %d %q, want %d laptop", n.TokenID, n.TokenName, tokID)
+		}
+	}
+
+	// deleting the token disconnects its PC; the other one stays online
+	if code := doJSON(t, ts, cookie, "DELETE", fmt.Sprintf("/api/me/node-tokens/%d", tokID), nil, nil); code != 200 {
+		t.Fatalf("delete token: status %d", code)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		doJSON(t, ts, cookie, "GET", "/api/state", nil, &st)
+		second, first := true, false
+		for _, n := range st.Nodes {
+			if n.Name == "second-pc" {
+				second = n.Connected
+			}
+			if n.Name == "test-pc" {
+				first = n.Connected
+			}
+		}
+		if !second && first {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("after token delete: nodes = %+v", st.Nodes)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// the deleted token can no longer authenticate
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/api/node/ws"
+	if _, resp, err := websocket.DefaultDialer.Dial(wsURL, http.Header{"Authorization": {"Bearer " + tok2}}); err == nil || resp.StatusCode != 401 {
+		t.Fatalf("deleted token still accepted: %v", resp)
+	}
+
+	// cap: fill up to 16, the 17th is rejected
+	for i := 2; i <= 16; i++ {
+		nodeToken(t, ts, cookie, fmt.Sprintf("t%d", i))
+	}
+	if code := doJSON(t, ts, cookie, "POST", "/api/me/node-tokens", map[string]string{"name": "overflow"}, nil); code != 400 {
+		t.Fatalf("17th token: status %d, want 400", code)
+	}
 }
 
 func TestTerminalRoundTripAndReattach(t *testing.T) {

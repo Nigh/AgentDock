@@ -18,9 +18,10 @@ agents. Two Go binaries plus a web frontend:
   registrations pending until approved), accepts any number of PC node
   connections, relays terminal traffic between browsers and nodes.
 - **agent-client** — runs on a user's PC. Dials OUT to the server
-  (never listens) authenticating with its owner's personal node token,
-  hosts tmux-like PTY sessions that survive browser disconnects.
-  Sessions die with the client process.
+  (never listens) authenticating with one of its owner's node tokens
+  (each user holds up to 16, with optional aliases), hosts tmux-like
+  PTY sessions that survive browser disconnects. Sessions die with
+  the client process.
 
 Access model: a node belongs to the user whose token it connected
 with; visible to owner + admins. Any user with access can share the
@@ -37,7 +38,9 @@ server/
                               user load + node ACL checks, static SPA
   internal/auth/              bcrypt, JWT HttpOnly cookie
   internal/database/          SQLite via modernc.org/sqlite (CGO-free);
-                              users (role/status/node_token_hash), nodes,
+                              users (role/status), node_tokens (<=16/user,
+                              alias, sha256; legacy users.node_token_hash
+                              migrates on open), nodes (token_id),
                               node_access, directories (per user),
                               sessions (node_id), settings
   internal/hub/               multi-node registry, session->node routing,
@@ -63,8 +66,9 @@ web/                          Svelte 5 (runes) + Vite + Tailwind 4 + xterm.js
                               '#/browse?node=<id>&path=...', '#/admin';
                               mounts the global ConfirmDialog
   src/lib/                    Login (register toggle), Dashboard (node
-                              cards, token card, share), Admin, Terminal,
-                              Browse, api.js, confirm.svelte.js +
+                              cards with token badge, node-tokens card:
+                              alias + per-token PC list + delete, share),
+                              Admin, Terminal, Browse, api.js, confirm.svelte.js +
                               ConfirmDialog.svelte (promise-based modal on
                               native <dialog>, replaces window.confirm)
   vite.config.js              outDir -> server/internal/webui/dist
@@ -90,9 +94,12 @@ out). Attach replay ordering: hub holds a browser's output until its
 ```
 POST /api/register                  first user = active admin, rest pending
 POST /api/login | POST /api/logout | GET /api/me
-POST /api/me/node-token             (re)generate personal token, plaintext once
-GET  /api/state                     me + accessible nodes (+shares) + their
-                                    sessions + own directories
+GET  /api/me/node-tokens            list own node tokens (id, alias, created)
+POST /api/me/node-tokens {name?}    mint token (max 16/user), plaintext once
+DELETE /api/me/node-tokens/{id}     revoke + disconnect PCs using it
+GET  /api/state                     me + accessible nodes (+shares +
+                                    token_id/token_name) + their sessions
+                                    + own directories + own tokens
 GET  /api/users                     admin: full list; others: active uid+name
 POST /api/users/{id}/approve, DELETE /api/users/{id}   (admin)
 POST /api/nodes/{id}/share {uid}    anyone with access may share onward
@@ -103,8 +110,9 @@ POST /api/sessions                  {node_id | from_session}; waits (10s)
                                     for node ack; from_session inherits cwd
 DELETE /api/sessions/{id}
 GET  /api/sessions/{id}/ws          browser terminal (cookie + Origin check)
-GET  /api/node/ws                   node (Bearer adk_... personal token,
-                                    stored as sha256 in users)
+GET  /api/node/ws                   node (Bearer adk_... token, sha256 in
+                                    node_tokens; hub records which token a
+                                    node connected with)
 ```
 
 Every node/session-scoped route re-checks node access
@@ -142,12 +150,16 @@ binaries in the image), `docker-compose.yml` reads `.env`.
 ## Tests
 
 - `server/e2e/e2e_test.go` — the main check: registration (first =
-  admin), personal node token, real PTY round-trip (create session,
+  admin), node tokens, real PTY round-trip (create session,
   echo, detach, re-attach scrollback replay, kill, exited notice),
   directory browsing (`/api/browse` + `from_session` cwd inheritance),
-  and the multi-user flow (pending login 403, approval, node
-  invisibility, 403s before sharing, share + onward share, revoke).
+  the multi-user flow (pending login 403, approval, node
+  invisibility, 403s before sharing, share + onward share, revoke),
+  and multi-token (second PC on a second token, state links node to
+  token, delete disconnects + 401s that token, 16-token cap).
 - `server/internal/auth/auth_test.go` — bcrypt + JWT.
+- `server/internal/database/db_test.go` — legacy single-token
+  migration into node_tokens (idempotent).
 - `client/internal/session/ring_test.go` — scrollback ring buffer.
 
 Any change to hub/relay/session/protocol logic must keep these green;
@@ -160,7 +172,8 @@ extend the e2e test when adding protocol behavior.
   intentional simplifications and their upgrade path.
 - Security invariants (do not weaken): PC dials out only; bcrypt
   passwords; no default credentials; node tokens stored hashed
-  (sha256), plaintext shown once; pending users cannot log in and are
+  (sha256), plaintext shown once, capped at 16 per user, deleting one
+  disconnects its PCs; pending users cannot log in and are
   re-checked per request; node ACL enforced on every node/session
   route; HttpOnly SameSite=Lax cookie; Origin check on mutating
   requests and the browser ws.
