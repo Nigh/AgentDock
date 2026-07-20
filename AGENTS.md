@@ -67,7 +67,10 @@ web/                          Svelte 5 (runes) + Vite + Tailwind 4 + xterm.js
                               mounts the global ConfirmDialog
   src/lib/                    Login (register toggle), Dashboard (node
                               cards with token badge, node-tokens card:
-                              alias + per-token PC list + delete, share),
+                              alias + per-token PC list + delete, share;
+                              exited sessions: Reopen = create same
+                              name/cwd/shell on that node when online,
+                              then delete the exited row),
                               Admin, Terminal, Browse, api.js, confirm.svelte.js +
                               ConfirmDialog.svelte (promise-based modal on
                               native <dialog>, replaces window.confirm)

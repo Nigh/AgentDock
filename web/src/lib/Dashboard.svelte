@@ -177,6 +177,24 @@
     refresh();
   }
 
+  // Spawn a new PTY with the exited session's name/cwd/shell (spawn-time cwd;
+  // live cwd is gone with the process), then drop the exited card.
+  async function reopenSession(s) {
+    error = '';
+    creating = true;
+    try {
+      const r = await api.createSession({
+        name: s.name, nodeId: s.node_id, cwd: s.cwd, shell: s.shell,
+      });
+      await api.killSession(s.id).catch(() => {});
+      location.hash = `#/session/${r.id}?name=${encodeURIComponent(s.name)}`;
+    } catch (e) {
+      error = e.message;
+    } finally {
+      creating = false;
+    }
+  }
+
   function sessionsOf(nodeId) {
     return sessions.filter((s) => s.node_id === nodeId);
   }
@@ -379,6 +397,11 @@
                   <button onclick={() => openSession(s)}
                     class="rounded-lg bg-base-300/30 px-4 py-2 text-sm font-medium text-base-content hover:bg-base-300/50">
                     Open
+                  </button>
+                {:else if n.connected}
+                  <button onclick={() => reopenSession(s)} disabled={creating}
+                    class="rounded-lg bg-base-300/30 px-4 py-2 text-sm font-medium text-base-content hover:bg-base-300/50 disabled:opacity-50">
+                    Reopen
                   </button>
                 {/if}
                 <button onclick={() => killSession(s)} aria-label="Kill session {s.name}"
