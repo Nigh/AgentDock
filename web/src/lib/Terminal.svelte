@@ -61,6 +61,9 @@
       fontSize: 14,
       fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
       scrollback: 5000,
+      // AI CLIs (claude/codex/...) clear-screen + redraw constantly; without
+      // this the viewport teleports to the top once scrollback fills up.
+      scrollOnEraseInDisplay: true,
       // xianii theme tokens as hex (xterm can't parse oklch):
       // base-200, base-content, primary, base-300
       theme: {
