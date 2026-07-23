@@ -138,6 +138,7 @@
     } catch {
       /* clipboard permission denied; user can long-press paste instead */
     }
+    term?.focus(); // return focus to the terminal so Enter doesn't re-trigger the button
   }
 </script>
 
