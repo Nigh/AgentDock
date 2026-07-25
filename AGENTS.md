@@ -74,7 +74,10 @@ web/                          Svelte 5 (runes) + Vite + Tailwind 4 + xterm.js
                               Admin, Terminal, Browse, api.js, confirm.svelte.js +
                               ConfirmDialog.svelte (promise-based modal on
                               native <dialog>, replaces window.confirm)
-  vite.config.js              outDir -> server/internal/webui/dist
+  vite.config.js              outDir -> server/internal/webui/dist;
+                              build target es2022 (xterm 6.0's pre-minified
+                              `||=` breaks if re-minified for es2020: vim/
+                              DECRQM freeze, xterm.js#5800)
 ```
 
 ## Protocol (internal/protocol)
