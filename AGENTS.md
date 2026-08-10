@@ -78,6 +78,7 @@ web/                          Svelte 5 (runes) + Vite + Tailwind 4 + xterm.js
                               build target es2022 (xterm 6.0's pre-minified
                               `||=` breaks if re-minified for es2020: vim/
                               DECRQM freeze, xterm.js#5800)
+screenshots/                  README images: dashboard + herdr session
 ```
 
 ## Protocol (internal/protocol)
