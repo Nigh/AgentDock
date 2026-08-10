@@ -25,6 +25,17 @@ with other users.
 Key property: the PC **dials out** to the server. No port is ever
 opened on your PC.
 
+![Dashboard](screenshots/index.png)
+
+AgentDock also pairs well with
+[herdr](https://github.com/herdrdev/herdr): run herdr in a session and
+drive its multi-agent TUI from the browser.
+
+![herdr via AgentDock](screenshots/herdr.png)
+
+herdr's dense TUI is awkward on a phone; on mobile, open a normal
+terminal session instead and keep working as usual.
+
 ## Repository layout
 
 ```
@@ -44,6 +55,7 @@ client/
     session/         tmux-like PTY sessions + scrollback ring buffer
     ws/              outbound websocket with auto-reconnect
 web/                 Svelte 5 + Vite + Tailwind + xterm.js frontend
+screenshots/         README images (dashboard, herdr)
 ```
 
 ## Quick start
